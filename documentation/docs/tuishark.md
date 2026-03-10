@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2"]
+related_issues: ["#1", "#2", "#3"]
 related_mrs: ["!2"]
 ---
 
@@ -19,11 +19,25 @@ TuiShark is a modern terminal-based packet analyzer built in Rust. It provides a
 cargo run -- path/to/capture.pcapng
 ```
 
+### Live capture from a network interface
+
+```bash
+# Capture on a specific interface
+cargo run -- -i eth0
+
+# List available interfaces
+cargo run -- --list-interfaces
+
+# Launch without arguments to get an interactive interface picker
+cargo run
+```
+
 Or with a release build:
 
 ```bash
 cargo build --release
 ./target/release/tuishark path/to/capture.pcapng
+./target/release/tuishark -i eth0
 ```
 
 ### Keyboard shortcuts
@@ -36,6 +50,9 @@ cargo build --release
 | `Tab` / `Shift+Tab` | Cycle panes forward / backward |
 | `1` / `2` / `3` | Focus packet table / detail tree / hex view |
 | `Enter` or `Space` | Expand/collapse protocol layer |
+| `c` | Open interface picker (when not capturing) |
+| `Esc` | Stop live capture |
+| `f` | Toggle auto-scroll during live capture |
 | `q` or `Ctrl+C` | Quit |
 
 ## Configuration
@@ -75,3 +92,7 @@ The application follows a 4-pane layout:
 ### Supported protocols (Phase 1)
 
 Ethernet, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, ARP, plus port-based classification for DNS (53), HTTP (80/8080), and TLS (443).
+
+### Live capture (Phase 2)
+
+Live capture runs a background thread that sniffs packets via libpcap and streams them to the UI over an `mpsc` channel. The packet table auto-scrolls to follow new packets; manual navigation pauses auto-scroll, and `f` re-enables it. Capture state (Idle/Capturing/Stopped) is shown in both the header and status bar.

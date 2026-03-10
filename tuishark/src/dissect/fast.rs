@@ -71,7 +71,7 @@ pub fn parse_packet(index: usize, timestamp: f64, data: &[u8]) -> PacketSummary 
     }
 
     if info.is_empty() {
-        info = format!("{protocol}");
+        info = protocol.to_string();
     }
 
     PacketSummary {
@@ -82,12 +82,11 @@ pub fn parse_packet(index: usize, timestamp: f64, data: &[u8]) -> PacketSummary 
         protocol,
         length: data.len(),
         info,
-        raw_data: data.to_vec(),
     }
 }
 
 pub fn dissect_detail(data: &[u8]) -> PacketDetail {
-    let mut detail = PacketDetail::new();
+    let mut detail = PacketDetail::default();
 
     if let Ok(parsed) = SlicedPacket::from_ethernet(data) {
         // Ethernet layer
@@ -347,4 +346,143 @@ fn format_tcp_flags(tcp: &etherparse::TcpSlice) -> String {
         flags.push("URG");
     }
     flags.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_eth_ipv4_tcp(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, flags: u8) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        // Ethernet header
+        pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // dst mac
+        pkt.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]); // src mac
+        pkt.extend_from_slice(&[0x08, 0x00]); // ethertype IPv4
+        // IPv4 header (20 bytes)
+        pkt.push(0x45); // version + IHL
+        pkt.push(0x00); // DSCP
+        pkt.extend_from_slice(&((40u16).to_be_bytes())); // total length (20 IP + 20 TCP)
+        pkt.extend_from_slice(&[0x00, 0x00]); // identification
+        pkt.extend_from_slice(&[0x40, 0x00]); // flags + fragment offset
+        pkt.push(64); // TTL
+        pkt.push(6);  // protocol TCP
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&src_ip);
+        pkt.extend_from_slice(&dst_ip);
+        // TCP header (20 bytes)
+        pkt.extend_from_slice(&src_port.to_be_bytes());
+        pkt.extend_from_slice(&dst_port.to_be_bytes());
+        pkt.extend_from_slice(&1000u32.to_be_bytes()); // seq
+        pkt.extend_from_slice(&2000u32.to_be_bytes()); // ack
+        pkt.push(0x50); // data offset = 5 (20 bytes)
+        pkt.push(flags);
+        pkt.extend_from_slice(&65535u16.to_be_bytes()); // window
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt.extend_from_slice(&[0x00, 0x00]); // urgent pointer
+        pkt
+    }
+
+    fn make_eth_ipv4_udp(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        // Ethernet header
+        pkt.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        pkt.extend_from_slice(&[0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
+        pkt.extend_from_slice(&[0x08, 0x00]);
+        // IPv4 header
+        pkt.push(0x45);
+        pkt.push(0x00);
+        pkt.extend_from_slice(&((28u16).to_be_bytes())); // 20 IP + 8 UDP
+        pkt.extend_from_slice(&[0x00, 0x00]);
+        pkt.extend_from_slice(&[0x40, 0x00]);
+        pkt.push(64);
+        pkt.push(17); // UDP
+        pkt.extend_from_slice(&[0x00, 0x00]);
+        pkt.extend_from_slice(&src_ip);
+        pkt.extend_from_slice(&dst_ip);
+        // UDP header
+        pkt.extend_from_slice(&src_port.to_be_bytes());
+        pkt.extend_from_slice(&dst_port.to_be_bytes());
+        pkt.extend_from_slice(&8u16.to_be_bytes()); // length
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
+        pkt
+    }
+
+    #[test]
+    fn parse_tcp_syn() {
+        let data = make_eth_ipv4_tcp([192, 168, 1, 10], [93, 184, 216, 34], 54321, 443, 0x02);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert_eq!(pkt.source, "192.168.1.10");
+        assert_eq!(pkt.destination, "93.184.216.34");
+        assert!(matches!(pkt.protocol, Protocol::Tls)); // port 443
+        assert!(pkt.info.contains("SYN"));
+    }
+
+    #[test]
+    fn parse_udp_dns() {
+        let data = make_eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 12345, 53);
+        let pkt = parse_packet(0, 1.0, &data);
+        assert_eq!(pkt.source, "10.0.0.1");
+        assert_eq!(pkt.destination, "8.8.8.8");
+        assert!(matches!(pkt.protocol, Protocol::Dns));
+    }
+
+    #[test]
+    fn parse_http_port() {
+        let data = make_eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 54321, 80, 0x18);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert!(matches!(pkt.protocol, Protocol::Http));
+    }
+
+    #[test]
+    fn parse_plain_tcp() {
+        let data = make_eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 12345, 9999, 0x10);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert!(matches!(pkt.protocol, Protocol::Tcp));
+    }
+
+    #[test]
+    fn parse_empty_data() {
+        let pkt = parse_packet(0, 0.0, &[]);
+        assert!(matches!(pkt.protocol, Protocol::Unknown(_)));
+        assert_eq!(pkt.length, 0);
+    }
+
+    #[test]
+    fn parse_truncated_data() {
+        let pkt = parse_packet(0, 0.0, &[0xff, 0xff, 0xff]);
+        assert!(matches!(pkt.protocol, Protocol::Unknown(_)));
+    }
+
+    #[test]
+    fn dissect_detail_tcp() {
+        let data = make_eth_ipv4_tcp([192, 168, 1, 10], [10, 0, 0, 1], 54321, 80, 0x02);
+        let detail = dissect_detail(&data);
+        assert_eq!(detail.layers.len(), 3); // Ethernet, IPv4, TCP
+        assert!(detail.layers[0].name.contains("Ethernet"));
+        assert!(detail.layers[1].name.contains("IPv4"));
+        assert!(detail.layers[2].name.contains("TCP"));
+    }
+
+    #[test]
+    fn dissect_detail_empty() {
+        let detail = dissect_detail(&[]);
+        assert_eq!(detail.layers.len(), 0);
+    }
+
+    #[test]
+    fn format_mac_test() {
+        assert_eq!(format_mac([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]), "00:11:22:33:44:55");
+        assert_eq!(format_mac([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), "ff:ff:ff:ff:ff:ff");
+    }
+
+    #[test]
+    fn classify_ports() {
+        assert!(matches!(classify_tcp_port(12345, 80), Protocol::Http));
+        assert!(matches!(classify_tcp_port(80, 12345), Protocol::Http));
+        assert!(matches!(classify_tcp_port(12345, 443), Protocol::Tls));
+        assert!(matches!(classify_tcp_port(12345, 9999), Protocol::Tcp));
+        assert!(matches!(classify_udp_port(12345, 53), Protocol::Dns));
+        assert!(matches!(classify_udp_port(53, 12345), Protocol::Dns));
+        assert!(matches!(classify_udp_port(12345, 9999), Protocol::Udp));
+    }
 }

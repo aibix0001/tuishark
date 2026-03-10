@@ -45,7 +45,7 @@ impl Widget for StatusBar<'_> {
                 Style::default().fg(self.theme.text).bg(self.theme.surface0),
             ),
             Span::styled(
-                " TuiShark v0.1.0 ",
+                format!(" TuiShark v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(self.theme.subtext0).bg(self.theme.surface0),
             ),
         ]);

@@ -21,12 +21,17 @@ struct Cli {
     file: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = tui::restore();
+        original_hook(info);
+    }));
+
     let mut terminal = tui::init()?;
-    let result = app::App::new(cli.file).run(&mut terminal).await;
+    let result = app::App::new(cli.file).run(&mut terminal);
     tui::restore()?;
 
     result

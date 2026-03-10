@@ -21,6 +21,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     PacketTable,
@@ -51,6 +53,7 @@ pub struct App {
     store: PacketStore,
     selected_packet: Option<usize>,
     scroll_offset: usize,
+    visible_rows: usize,
     active_pane: Pane,
     theme: Theme,
     detail: Option<PacketDetail>,
@@ -63,9 +66,10 @@ impl App {
     pub fn new(file: Option<PathBuf>) -> Self {
         Self {
             running: true,
-            store: PacketStore::new(),
+            store: PacketStore::default(),
             selected_packet: None,
             scroll_offset: 0,
+            visible_rows: 20,
             active_pane: Pane::PacketTable,
             theme: Theme::mocha(),
             detail: None,
@@ -75,12 +79,12 @@ impl App {
         }
     }
 
-    pub async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
+    pub fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         // Load file if provided
         if let Some(path) = &self.file_path {
             let packets = load_pcap(path)?;
-            for pkt in packets {
-                self.store.add(pkt);
+            for (pkt, raw) in packets {
+                self.store.add(pkt, raw);
             }
             if !self.store.is_empty() {
                 self.select_packet(0);
@@ -102,13 +106,16 @@ impl App {
         Ok(())
     }
 
-    fn render(&self, frame: &mut ratatui::Frame) {
+    fn render(&mut self, frame: &mut ratatui::Frame) {
         let layout = AppLayout::new(frame.area());
+
+        // Update visible rows from actual terminal height
+        self.visible_rows = layout.packet_table.height.saturating_sub(3) as usize;
 
         // Header
         let header = Line::from(vec![
             Span::styled(
-                " TuiShark v0.1.0 ",
+                format!(" TuiShark v{VERSION} "),
                 Style::default()
                     .fg(self.theme.blue)
                     .add_modifier(Modifier::BOLD),
@@ -130,12 +137,10 @@ impl App {
         frame.render_widget(header_widget, layout.header);
 
         // Packet table — virtual scroll: only render visible rows
-        let table_height = layout.packet_table.height.saturating_sub(3) as usize; // minus border + header
-        let visible = self.store.get_range(self.scroll_offset, table_height);
+        let visible = self.store.get_range(self.scroll_offset, self.visible_rows);
         let table = PacketTable::new(
             visible,
             self.selected_packet,
-            self.scroll_offset,
             &self.theme,
             self.active_pane == Pane::PacketTable,
         );
@@ -154,8 +159,7 @@ impl App {
         // Hex view
         let hex_data = self
             .selected_packet
-            .and_then(|idx| self.store.get(idx))
-            .map(|pkt| pkt.raw_data.as_slice());
+            .and_then(|idx| self.store.get_raw(idx));
         let hex_view = HexView::new(hex_data, &self.theme, self.active_pane == Pane::HexView);
         frame.render_widget(hex_view, layout.bottom_left);
 
@@ -183,12 +187,7 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         // Global shortcuts
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
-                self.running = false;
-                return;
-            }
-            (_, KeyCode::Char('q')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
                 self.running = false;
                 return;
             }
@@ -219,7 +218,7 @@ impl App {
         match self.active_pane {
             Pane::PacketTable => self.handle_packet_table_key(key),
             Pane::DetailTree => self.handle_detail_tree_key(key),
-            Pane::HexView => {} // no special keys yet
+            Pane::HexView => {}
         }
     }
 
@@ -306,8 +305,8 @@ impl App {
         self.selected_packet = Some(index);
 
         // Dissect packet detail
-        if let Some(pkt) = self.store.get(index) {
-            let detail = dissect_detail(&pkt.raw_data);
+        if let Some(raw) = self.store.get_raw(index) {
+            let detail = dissect_detail(raw);
             let layer_count = detail.layers.len();
             self.detail = Some(detail);
             self.expanded_layers = vec![true; layer_count];
@@ -315,12 +314,29 @@ impl App {
         }
 
         // Adjust scroll offset to keep selected packet visible
-        // We estimate ~20 visible rows; will be refined when we know actual terminal height
-        let visible_rows = 20_usize;
         if index < self.scroll_offset {
             self.scroll_offset = index;
-        } else if index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = index - visible_rows + 1;
+        } else if self.visible_rows > 0 && index >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = index - self.visible_rows + 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_next_cycles() {
+        assert_eq!(Pane::PacketTable.next(), Pane::DetailTree);
+        assert_eq!(Pane::DetailTree.next(), Pane::HexView);
+        assert_eq!(Pane::HexView.next(), Pane::PacketTable);
+    }
+
+    #[test]
+    fn pane_prev_cycles() {
+        assert_eq!(Pane::PacketTable.prev(), Pane::HexView);
+        assert_eq!(Pane::DetailTree.prev(), Pane::PacketTable);
+        assert_eq!(Pane::HexView.prev(), Pane::DetailTree);
     }
 }

@@ -11,7 +11,6 @@ use crate::ui::theme::Theme;
 pub struct PacketTable<'a> {
     packets: &'a [PacketSummary],
     selected: Option<usize>,
-    offset: usize,
     theme: &'a Theme,
     focused: bool,
 }
@@ -20,14 +19,12 @@ impl<'a> PacketTable<'a> {
     pub fn new(
         packets: &'a [PacketSummary],
         selected: Option<usize>,
-        offset: usize,
         theme: &'a Theme,
         focused: bool,
     ) -> Self {
         Self {
             packets,
             selected,
-            offset,
             theme,
             focused,
         }
@@ -74,12 +71,12 @@ impl Widget for PacketTable<'_> {
                 };
 
                 Row::new(vec![
-                    format!("{}", pkt.index + 1),
+                    (pkt.index + 1).to_string(),
                     format!("{:.6}", pkt.timestamp),
                     pkt.source.clone(),
                     pkt.destination.clone(),
-                    format!("{}", pkt.protocol),
-                    format!("{}", pkt.length),
+                    pkt.protocol.to_string(),
+                    pkt.length.to_string(),
                     pkt.info.clone(),
                 ])
                 .style(style)

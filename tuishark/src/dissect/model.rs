@@ -9,7 +9,6 @@ pub struct PacketSummary {
     pub protocol: Protocol,
     pub length: usize,
     pub info: String,
-    pub raw_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,22 +50,17 @@ impl fmt::Display for Protocol {
 pub struct LayerField {
     pub name: String,
     pub value: String,
+    #[allow(dead_code)] // used in Phase 3 for hex view highlight
     pub byte_range: Option<(usize, usize)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Layer {
     pub name: String,
     pub fields: Vec<LayerField>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PacketDetail {
     pub layers: Vec<Layer>,
-}
-
-impl PacketDetail {
-    pub fn new() -> Self {
-        Self { layers: Vec::new() }
-    }
 }

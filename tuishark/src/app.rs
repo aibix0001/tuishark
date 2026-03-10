@@ -111,6 +111,8 @@ pub struct App {
     selected_layer: Option<usize>,
     selected_field: Option<usize>,
     highlight_range: Option<(usize, usize)>,
+    detail_scroll_offset: usize,
+    detail_visible_rows: usize,
     file_path: Option<PathBuf>,
     // Live capture state
     interface_name: Option<String>,
@@ -251,6 +253,8 @@ impl App {
             selected_layer: None,
             selected_field: None,
             highlight_range: None,
+            detail_scroll_offset: 0,
+            detail_visible_rows: 10,
             file_path: file,
             interface_name: interface,
             capture_state: CaptureState::Idle,
@@ -502,6 +506,7 @@ impl App {
                 self.expanded_layers = vec![true; layer_count];
                 self.selected_layer = if layer_count > 0 { Some(0) } else { None };
                 self.selected_field = None;
+                self.detail_scroll_offset = 0;
                 self.dissect_state = DissectState::Deep;
                 self.update_highlight();
             } else if let Some(err) = result.error {
@@ -541,6 +546,47 @@ impl App {
             if start < end {
                 self.highlight_range = Some((start, end));
             }
+        }
+        self.ensure_detail_visible();
+    }
+
+    /// Compute the line index of the currently selected item in the detail tree
+    /// and adjust detail_scroll_offset so it stays visible.
+    fn ensure_detail_visible(&mut self) {
+        if self.detail_visible_rows == 0 {
+            return;
+        }
+        let Some(ref detail) = self.detail else {
+            return;
+        };
+        let Some(sel_layer) = self.selected_layer else {
+            return;
+        };
+
+        // Count lines up to the selected item
+        let mut line = 0usize;
+        for (i, layer) in detail.layers.iter().enumerate() {
+            if i == sel_layer && self.selected_field.is_none() {
+                break; // this is the selected line
+            }
+            line += 1; // layer header line
+            let is_expanded = self.expanded_layers.get(i).copied().unwrap_or(true);
+            if is_expanded {
+                if i == sel_layer {
+                    if let Some(fi) = self.selected_field {
+                        line += fi; // field lines before selected field
+                        break;
+                    }
+                }
+                line += layer.fields.len();
+            }
+        }
+
+        // Scroll so selected line is visible
+        if line < self.detail_scroll_offset {
+            self.detail_scroll_offset = line;
+        } else if line >= self.detail_scroll_offset + self.detail_visible_rows {
+            self.detail_scroll_offset = line.saturating_sub(self.detail_visible_rows - 1);
         }
     }
 
@@ -645,6 +691,8 @@ impl App {
         frame.render_widget(table, layout.packet_table);
 
         // Detail tree
+        // Update visible rows from actual area (subtract 2 for borders)
+        self.detail_visible_rows = layout.detail_tree.height.saturating_sub(2) as usize;
         let detail_tree = DetailTree::new(
             self.detail.as_ref(),
             &self.expanded_layers,
@@ -652,6 +700,7 @@ impl App {
             self.selected_field,
             &self.theme,
             self.active_pane == Pane::DetailTree,
+            self.detail_scroll_offset,
         );
         frame.render_widget(detail_tree, layout.detail_tree);
 
@@ -1231,6 +1280,7 @@ impl App {
             self.expanded_layers = vec![true; layer_count];
             self.selected_layer = if layer_count > 0 { Some(0) } else { None };
             self.selected_field = None;
+            self.detail_scroll_offset = 0;
             self.dissect_state = DissectState::Fast;
             self.update_highlight();
 

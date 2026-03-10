@@ -16,6 +16,7 @@ pub struct DetailTree<'a> {
     selected_field: Option<usize>,
     theme: &'a Theme,
     focused: bool,
+    scroll_offset: usize,
 }
 
 impl<'a> DetailTree<'a> {
@@ -26,6 +27,7 @@ impl<'a> DetailTree<'a> {
         selected_field: Option<usize>,
         theme: &'a Theme,
         focused: bool,
+        scroll_offset: usize,
     ) -> Self {
         Self {
             detail,
@@ -34,6 +36,7 @@ impl<'a> DetailTree<'a> {
             selected_field,
             theme,
             focused,
+            scroll_offset,
         }
     }
 }
@@ -123,7 +126,9 @@ impl Widget for DetailTree<'_> {
             }
         }
 
-        let p = Paragraph::new(lines).block(block);
+        let p = Paragraph::new(lines)
+            .block(block)
+            .scroll((u16::try_from(self.scroll_offset).unwrap_or(u16::MAX), 0));
         p.render(area, buf);
     }
 }

@@ -1,6 +1,7 @@
 /// Conversation statistics: bidirectional packet/byte counts per IP:port pair.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use crate::dissect::model::PacketSummary;
 use crate::store::packet_store::PacketStore;
@@ -35,7 +36,7 @@ impl ConversationStats {
 }
 
 /// Canonical key for conversation deduplication.
-/// Lower address always goes to position A.
+/// Address A is the numerically lower IP (or lexicographically if not parseable).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConvKey {
     addr_a: String,
@@ -45,10 +46,22 @@ struct ConvKey {
     protocol: String,
 }
 
+/// Compare addresses numerically (as IpAddr) when possible, falling back to string comparison.
+fn addr_is_lower(a: &str, a_port: Option<u16>, b: &str, b_port: Option<u16>) -> bool {
+    if let (Ok(ip_a), Ok(ip_b)) = (a.parse::<IpAddr>(), b.parse::<IpAddr>()) {
+        match ip_a.cmp(&ip_b) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a_port <= b_port,
+        }
+    } else {
+        (a, a_port) <= (b, b_port)
+    }
+}
+
 fn make_key(pkt: &PacketSummary) -> (ConvKey, bool) {
-    let proto = format!("{}", pkt.protocol);
-    // Canonical ordering: compare (addr, port) tuples to ensure consistent direction
-    let is_forward = (&pkt.source, pkt.src_port) <= (&pkt.destination, pkt.dst_port);
+    let proto = pkt.protocol.to_string();
+    let is_forward = addr_is_lower(&pkt.source, pkt.src_port, &pkt.destination, pkt.dst_port);
     if is_forward {
         (
             ConvKey {
@@ -77,7 +90,7 @@ fn make_key(pkt: &PacketSummary) -> (ConvKey, bool) {
 pub fn compute(store: &PacketStore, indices: Option<&[usize]>) -> Vec<ConversationStats> {
     let mut map: HashMap<ConvKey, ConversationStats> = HashMap::new();
 
-    let mut process = |pkt: &PacketSummary| {
+    for pkt in store.iter_packets(indices) {
         let (key, is_forward) = make_key(pkt);
         let bytes = pkt.original_length as u64;
         let entry = map.entry(key).or_insert_with_key(|k| ConversationStats {
@@ -106,23 +119,6 @@ pub fn compute(store: &PacketStore, indices: Option<&[usize]>) -> Vec<Conversati
         }
         if pkt.timestamp > entry.last_seen {
             entry.last_seen = pkt.timestamp;
-        }
-    };
-
-    match indices {
-        Some(idx) => {
-            for &i in idx {
-                if let Some(pkt) = store.get(i) {
-                    process(pkt);
-                }
-            }
-        }
-        None => {
-            for i in 0..store.len() {
-                if let Some(pkt) = store.get(i) {
-                    process(pkt);
-                }
-            }
         }
     }
 
@@ -223,10 +219,8 @@ mod tests {
     #[test]
     fn single_conversation() {
         let mut store = PacketStore::default();
-        // Forward: 10.0.0.1:12345 → 10.0.0.2:80
         let (pkt, raw) = make_pkt_ports(0, "10.0.0.1", "10.0.0.2", 12345, 80, Protocol::Tcp, 100);
         store.add(pkt, raw);
-        // Reverse: 10.0.0.2:80 → 10.0.0.1:12345
         let (pkt, raw) = make_pkt_ports(1, "10.0.0.2", "10.0.0.1", 80, 12345, Protocol::Tcp, 200);
         store.add(pkt, raw);
 
@@ -241,10 +235,10 @@ mod tests {
     #[test]
     fn multiple_conversations() {
         let mut store = PacketStore::default();
-        store.add(make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).0,
-                  make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).1);
-        store.add(make_pkt(1, "10.0.0.3", "10.0.0.4", Protocol::Udp, 200).0,
-                  make_pkt(1, "10.0.0.3", "10.0.0.4", Protocol::Udp, 200).1);
+        let (p, r) = make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(1, "10.0.0.3", "10.0.0.4", Protocol::Udp, 200);
+        store.add(p, r);
 
         let convs = compute(&store, None);
         assert_eq!(convs.len(), 2);
@@ -266,12 +260,12 @@ mod tests {
     #[test]
     fn sort_by_column() {
         let mut store = PacketStore::default();
-        store.add(make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).0,
-                  make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).1);
-        store.add(make_pkt(1, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).0,
-                  make_pkt(1, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100).1);
-        store.add(make_pkt(2, "10.0.0.3", "10.0.0.4", Protocol::Udp, 500).0,
-                  make_pkt(2, "10.0.0.3", "10.0.0.4", Protocol::Udp, 500).1);
+        let (p, r) = make_pkt(0, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(1, "10.0.0.1", "10.0.0.2", Protocol::Tcp, 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(2, "10.0.0.3", "10.0.0.4", Protocol::Udp, 500);
+        store.add(p, r);
 
         let mut convs = compute(&store, None);
         sort_conversations(&mut convs, ConvSortColumn::TotalBytes, false);
@@ -279,5 +273,12 @@ mod tests {
 
         sort_conversations(&mut convs, ConvSortColumn::TotalBytes, true);
         assert!(convs[0].total_bytes() <= convs[1].total_bytes());
+    }
+
+    #[test]
+    fn numeric_ip_ordering() {
+        // 9.0.0.1 is numerically less than 10.0.0.1, despite lexicographic ordering
+        assert!(addr_is_lower("9.0.0.1", None, "10.0.0.1", None));
+        assert!(!addr_is_lower("10.0.0.1", None, "9.0.0.1", None));
     }
 }

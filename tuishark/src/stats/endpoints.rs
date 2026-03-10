@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use crate::dissect::model::PacketSummary;
 use crate::store::packet_store::PacketStore;
 
 #[derive(Debug, Clone)]
@@ -26,66 +25,39 @@ impl EndpointStats {
     }
 }
 
+fn update_endpoint(map: &mut HashMap<String, EndpointStats>, addr: &str, ts: f64, tx_bytes: u64, rx_bytes: u64) {
+    let entry = map.entry(addr.to_string()).or_insert_with(|| EndpointStats {
+        address: addr.to_string(),
+        tx_packets: 0,
+        rx_packets: 0,
+        tx_bytes: 0,
+        rx_bytes: 0,
+        first_seen: ts,
+        last_seen: ts,
+    });
+    if tx_bytes > 0 {
+        entry.tx_packets += 1;
+        entry.tx_bytes += tx_bytes;
+    }
+    if rx_bytes > 0 {
+        entry.rx_packets += 1;
+        entry.rx_bytes += rx_bytes;
+    }
+    if ts < entry.first_seen {
+        entry.first_seen = ts;
+    }
+    if ts > entry.last_seen {
+        entry.last_seen = ts;
+    }
+}
+
 pub fn compute(store: &PacketStore, indices: Option<&[usize]>) -> Vec<EndpointStats> {
     let mut map: HashMap<String, EndpointStats> = HashMap::new();
 
-    let mut process = |pkt: &PacketSummary| {
+    for pkt in store.iter_packets(indices) {
         let bytes = pkt.original_length as u64;
-
-        // Source endpoint → TX
-        let src = map.entry(pkt.source.clone()).or_insert_with(|| EndpointStats {
-            address: pkt.source.clone(),
-            tx_packets: 0,
-            rx_packets: 0,
-            tx_bytes: 0,
-            rx_bytes: 0,
-            first_seen: pkt.timestamp,
-            last_seen: pkt.timestamp,
-        });
-        src.tx_packets += 1;
-        src.tx_bytes += bytes;
-        if pkt.timestamp < src.first_seen {
-            src.first_seen = pkt.timestamp;
-        }
-        if pkt.timestamp > src.last_seen {
-            src.last_seen = pkt.timestamp;
-        }
-
-        // Destination endpoint → RX
-        let dst = map.entry(pkt.destination.clone()).or_insert_with(|| EndpointStats {
-            address: pkt.destination.clone(),
-            tx_packets: 0,
-            rx_packets: 0,
-            tx_bytes: 0,
-            rx_bytes: 0,
-            first_seen: pkt.timestamp,
-            last_seen: pkt.timestamp,
-        });
-        dst.rx_packets += 1;
-        dst.rx_bytes += bytes;
-        if pkt.timestamp < dst.first_seen {
-            dst.first_seen = pkt.timestamp;
-        }
-        if pkt.timestamp > dst.last_seen {
-            dst.last_seen = pkt.timestamp;
-        }
-    };
-
-    match indices {
-        Some(idx) => {
-            for &i in idx {
-                if let Some(pkt) = store.get(i) {
-                    process(pkt);
-                }
-            }
-        }
-        None => {
-            for i in 0..store.len() {
-                if let Some(pkt) = store.get(i) {
-                    process(pkt);
-                }
-            }
-        }
+        update_endpoint(&mut map, &pkt.source, pkt.timestamp, bytes, 0);
+        update_endpoint(&mut map, &pkt.destination, pkt.timestamp, 0, bytes);
     }
 
     let mut result: Vec<EndpointStats> = map.into_values().collect();
@@ -147,7 +119,7 @@ pub fn sort_endpoints(eps: &mut [EndpointStats], column: EndpointSortColumn, asc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{PacketSummary, Protocol};
 
     fn make_pkt(index: usize, src: &str, dst: &str, length: usize) -> (PacketSummary, Vec<u8>) {
         let raw = vec![0u8; length];
@@ -194,10 +166,10 @@ mod tests {
     #[test]
     fn bidirectional_traffic() {
         let mut store = PacketStore::default();
-        store.add(make_pkt(0, "10.0.0.1", "10.0.0.2", 100).0,
-                  make_pkt(0, "10.0.0.1", "10.0.0.2", 100).1);
-        store.add(make_pkt(1, "10.0.0.2", "10.0.0.1", 200).0,
-                  make_pkt(1, "10.0.0.2", "10.0.0.1", 200).1);
+        let (p, r) = make_pkt(0, "10.0.0.1", "10.0.0.2", 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(1, "10.0.0.2", "10.0.0.1", 200);
+        store.add(p, r);
 
         let eps = compute(&store, None);
         let ep1 = eps.iter().find(|e| e.address == "10.0.0.1").unwrap();
@@ -210,12 +182,12 @@ mod tests {
     #[test]
     fn sort_by_column() {
         let mut store = PacketStore::default();
-        store.add(make_pkt(0, "10.0.0.1", "10.0.0.2", 100).0,
-                  make_pkt(0, "10.0.0.1", "10.0.0.2", 100).1);
-        store.add(make_pkt(1, "10.0.0.1", "10.0.0.2", 100).0,
-                  make_pkt(1, "10.0.0.1", "10.0.0.2", 100).1);
-        store.add(make_pkt(2, "10.0.0.3", "10.0.0.4", 500).0,
-                  make_pkt(2, "10.0.0.3", "10.0.0.4", 500).1);
+        let (p, r) = make_pkt(0, "10.0.0.1", "10.0.0.2", 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(1, "10.0.0.1", "10.0.0.2", 100);
+        store.add(p, r);
+        let (p, r) = make_pkt(2, "10.0.0.3", "10.0.0.4", 500);
+        store.add(p, r);
 
         let mut eps = compute(&store, None);
         sort_endpoints(&mut eps, EndpointSortColumn::TxBytes, false);

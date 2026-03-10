@@ -13,13 +13,11 @@ use crate::stats::conversations::{ConvSortColumn, ConversationStats};
 use crate::stats::endpoints::{EndpointSortColumn, EndpointStats};
 use crate::stats::io_graph::IoGraphData;
 use crate::stats::model::StatsTab;
-use crate::stats::protocol::ProtocolHierarchy;
 use crate::ui::theme::Theme;
 
 pub struct StatsDialog<'a> {
     tab: StatsTab,
-    protocol_hierarchy: Option<&'a ProtocolHierarchy>,
-    proto_rows: &'a [(usize, String, usize, u64, f64, f64)],
+    proto_rows: &'a [(usize, usize, String, usize, u64, f64, f64)],
     proto_selected: usize,
     conversations: &'a [ConversationStats],
     conv_selected: usize,
@@ -41,8 +39,7 @@ impl<'a> StatsDialog<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tab: StatsTab,
-        protocol_hierarchy: Option<&'a ProtocolHierarchy>,
-        proto_rows: &'a [(usize, String, usize, u64, f64, f64)],
+        proto_rows: &'a [(usize, usize, String, usize, u64, f64, f64)],
         proto_selected: usize,
         conversations: &'a [ConversationStats],
         conv_selected: usize,
@@ -61,7 +58,6 @@ impl<'a> StatsDialog<'a> {
     ) -> Self {
         Self {
             tab,
-            protocol_hierarchy,
             proto_rows,
             proto_selected,
             conversations,
@@ -124,7 +120,6 @@ impl Widget for StatsDialog<'_> {
                 render_protocol_hierarchy(
                     chunks[1],
                     buf,
-                    self.protocol_hierarchy,
                     self.proto_rows,
                     self.proto_selected,
                     self.theme,
@@ -208,8 +203,7 @@ fn render_tab_bar(area: Rect, buf: &mut Buffer, active: StatsTab, theme: &Theme)
 fn render_protocol_hierarchy(
     area: Rect,
     buf: &mut Buffer,
-    hierarchy: Option<&ProtocolHierarchy>,
-    rows: &[(usize, String, usize, u64, f64, f64)],
+    rows: &[(usize, usize, String, usize, u64, f64, f64)],
     selected: usize,
     theme: &Theme,
 ) {
@@ -219,8 +213,6 @@ fn render_protocol_hierarchy(
         msg.render(area, buf);
         return;
     }
-
-    let _hierarchy = hierarchy; // used for total counts display
 
     // Header
     if area.height < 2 {
@@ -259,7 +251,7 @@ fn render_protocol_hierarchy(
 
     for (i, row) in rows.iter().enumerate().skip(scroll_offset).take(visible) {
         let y = content_area.y + (i - scroll_offset) as u16;
-        let (depth, name, packets, bytes, pct_pkts, pct_bytes) = row;
+        let (_node_idx, depth, name, packets, bytes, pct_pkts, pct_bytes) = row;
 
         let indent = "  ".repeat(*depth);
         let arrow = if *depth > 0 { "└ " } else { "" };
@@ -580,9 +572,10 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }

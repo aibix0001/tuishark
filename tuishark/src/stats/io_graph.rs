@@ -1,6 +1,5 @@
 /// I/O graph: packet/byte rate over time, bucketed into intervals.
 
-use crate::dissect::model::PacketSummary;
 use crate::store::packet_store::PacketStore;
 
 #[derive(Debug, Clone)]
@@ -17,39 +16,24 @@ pub struct IoGraphData {
 pub fn compute(store: &PacketStore, indices: Option<&[usize]>, num_buckets: usize) -> IoGraphData {
     let num_buckets = num_buckets.max(1);
 
-    // Find time range
+    // First pass: collect timestamps and lengths, find min/max
+    let mut entries: Vec<(f64, u64)> = Vec::new();
     let mut min_ts = f64::MAX;
     let mut max_ts = f64::MIN;
-    let mut count = 0usize;
 
-    let mut scan_ts = |pkt: &PacketSummary| {
-        if pkt.timestamp < min_ts {
-            min_ts = pkt.timestamp;
+    for pkt in store.iter_packets(indices) {
+        let ts = pkt.timestamp;
+        let bytes = pkt.original_length as u64;
+        if ts < min_ts {
+            min_ts = ts;
         }
-        if pkt.timestamp > max_ts {
-            max_ts = pkt.timestamp;
+        if ts > max_ts {
+            max_ts = ts;
         }
-        count += 1;
-    };
-
-    match indices {
-        Some(idx) => {
-            for &i in idx {
-                if let Some(pkt) = store.get(i) {
-                    scan_ts(pkt);
-                }
-            }
-        }
-        None => {
-            for i in 0..store.len() {
-                if let Some(pkt) = store.get(i) {
-                    scan_ts(pkt);
-                }
-            }
-        }
+        entries.push((ts, bytes));
     }
 
-    if count == 0 {
+    if entries.is_empty() {
         return IoGraphData {
             buckets_packets: vec![0; num_buckets],
             buckets_bytes: vec![0; num_buckets],
@@ -61,74 +45,35 @@ pub fn compute(store: &PacketStore, indices: Option<&[usize]>, num_buckets: usiz
         };
     }
 
-    // Single packet or all same timestamp: put everything in the first bucket
+    let mut buckets_packets = vec![0u64; num_buckets];
+    let mut buckets_bytes = vec![0u64; num_buckets];
+
     if min_ts >= max_ts {
-        let mut buckets_packets = vec![0u64; num_buckets];
-        let mut buckets_bytes = vec![0u64; num_buckets];
-        let mut total_pkts = 0u64;
-        let mut total_bytes = 0u64;
-        let mut fill_single = |pkt: &PacketSummary| {
-            total_pkts += 1;
-            total_bytes += pkt.original_length as u64;
-        };
-        match indices {
-            Some(idx) => {
-                for &i in idx {
-                    if let Some(pkt) = store.get(i) {
-                        fill_single(pkt);
-                    }
-                }
-            }
-            None => {
-                for i in 0..store.len() {
-                    if let Some(pkt) = store.get(i) {
-                        fill_single(pkt);
-                    }
-                }
-            }
+        // Single timestamp: everything in first bucket
+        for &(_ts, bytes) in &entries {
+            buckets_packets[0] += 1;
+            buckets_bytes[0] += bytes;
         }
-        buckets_packets[0] = total_pkts;
-        buckets_bytes[0] = total_bytes;
         return IoGraphData {
-            buckets_packets,
-            buckets_bytes,
+            buckets_packets: buckets_packets.clone(),
+            buckets_bytes: buckets_bytes.clone(),
             bucket_width_secs: 1.0,
             start_time: min_ts,
             end_time: max_ts,
-            max_packets: total_pkts,
-            max_bytes: total_bytes,
+            max_packets: buckets_packets[0],
+            max_bytes: buckets_bytes[0],
         };
     }
 
     let duration = max_ts - min_ts;
-    // Add tiny epsilon to avoid edge case where last packet falls into bucket N
-    let bucket_width = duration / num_buckets as f64 + 1e-9;
+    let bucket_width = duration / num_buckets as f64;
 
-    let mut buckets_packets = vec![0u64; num_buckets];
-    let mut buckets_bytes = vec![0u64; num_buckets];
-
-    let mut fill = |pkt: &PacketSummary| {
-        let bucket = ((pkt.timestamp - min_ts) / bucket_width) as usize;
-        let bucket = bucket.min(num_buckets - 1);
+    // Second pass: fill buckets from collected entries
+    for &(ts, bytes) in &entries {
+        let bucket = ((ts - min_ts) / bucket_width) as usize;
+        let bucket = bucket.min(num_buckets - 1); // clamp last packet
         buckets_packets[bucket] += 1;
-        buckets_bytes[bucket] += pkt.original_length as u64;
-    };
-
-    match indices {
-        Some(idx) => {
-            for &i in idx {
-                if let Some(pkt) = store.get(i) {
-                    fill(pkt);
-                }
-            }
-        }
-        None => {
-            for i in 0..store.len() {
-                if let Some(pkt) = store.get(i) {
-                    fill(pkt);
-                }
-            }
-        }
+        buckets_bytes[bucket] += bytes;
     }
 
     let max_packets = buckets_packets.iter().copied().max().unwrap_or(0);
@@ -148,7 +93,7 @@ pub fn compute(store: &PacketStore, indices: Option<&[usize]>, num_buckets: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{PacketSummary, Protocol};
 
     fn make_pkt(index: usize, timestamp: f64, length: usize) -> (PacketSummary, Vec<u8>) {
         let raw = vec![0u8; length];
@@ -178,10 +123,10 @@ mod tests {
     #[test]
     fn single_packet() {
         let mut store = PacketStore::default();
-        store.add(make_pkt(0, 1.0, 100).0, make_pkt(0, 1.0, 100).1);
+        let (p, r) = make_pkt(0, 1.0, 100);
+        store.add(p, r);
 
         let data = compute(&store, None, 10);
-        // Single packet → all in one bucket
         assert_eq!(data.max_packets, 1);
     }
 
@@ -189,13 +134,13 @@ mod tests {
     fn even_distribution() {
         let mut store = PacketStore::default();
         for i in 0..100 {
-            let ts = i as f64 * 0.1; // 0.0 to 9.9 seconds
-            store.add(make_pkt(i, ts, 100).0, make_pkt(i, ts, 100).1);
+            let ts = i as f64 * 0.1;
+            let (p, r) = make_pkt(i, ts, 100);
+            store.add(p, r);
         }
 
         let data = compute(&store, None, 10);
         assert_eq!(data.buckets_packets.len(), 10);
-        // Each bucket should have ~10 packets
         let total: u64 = data.buckets_packets.iter().sum();
         assert_eq!(total, 100);
     }
@@ -205,7 +150,8 @@ mod tests {
         let mut store = PacketStore::default();
         for i in 0..100 {
             let ts = i as f64 * 0.1;
-            store.add(make_pkt(i, ts, 100).0, make_pkt(i, ts, 100).1);
+            let (p, r) = make_pkt(i, ts, 100);
+            store.add(p, r);
         }
 
         let indices: Vec<usize> = (0..50).collect();
@@ -218,7 +164,8 @@ mod tests {
     fn respects_num_buckets() {
         let mut store = PacketStore::default();
         for i in 0..20 {
-            store.add(make_pkt(i, i as f64, 100).0, make_pkt(i, i as f64, 100).1);
+            let (p, r) = make_pkt(i, i as f64, 100);
+            store.add(p, r);
         }
 
         let data5 = compute(&store, None, 5);

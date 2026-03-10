@@ -154,7 +154,7 @@ pub struct App {
     stats_tab: StatsTab,
     stats_filter_aware: bool,
     stats_proto_hierarchy: Option<ProtocolHierarchy>,
-    stats_proto_rows: Vec<(usize, String, usize, u64, f64, f64)>,
+    stats_proto_rows: Vec<(usize, usize, String, usize, u64, f64, f64)>,
     stats_proto_expanded: Vec<bool>,
     stats_proto_selected: usize,
     stats_conversations: Vec<ConversationStats>,
@@ -170,6 +170,7 @@ pub struct App {
     stats_io_graph: Option<IoGraphData>,
     stats_io_show_bytes: bool,
     stats_io_num_buckets: usize,
+    stats_content_height: usize,
 }
 
 impl App {
@@ -280,6 +281,7 @@ impl App {
             stats_io_graph: None,
             stats_io_show_bytes: false,
             stats_io_num_buckets: 50,
+            stats_content_height: 20,
         }
     }
 
@@ -642,9 +644,12 @@ impl App {
             let dialog = QuitConfirm::new(&self.theme);
             frame.render_widget(dialog, frame.area());
         } else if self.show_stats_dialog {
+            // Track dialog content height for scroll calculations
+            let dialog_h = (frame.area().height as u32 * 80 / 100) as u16;
+            // dialog chrome: 2 border + 1 tab bar + 1 help line + 1 header = 5
+            self.stats_content_height = dialog_h.saturating_sub(7) as usize;
             let dialog = StatsDialog::new(
                 self.stats_tab,
-                self.stats_proto_hierarchy.as_ref(),
                 &self.stats_proto_rows,
                 self.stats_proto_selected,
                 &self.stats_conversations,
@@ -1638,18 +1643,21 @@ impl App {
                 self.stats_proto_selected = row_count - 1;
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                // Toggle expand/collapse at selected node
-                if self.stats_proto_selected < self.stats_proto_expanded.len() {
-                    self.stats_proto_expanded[self.stats_proto_selected] =
-                        !self.stats_proto_expanded[self.stats_proto_selected];
-                    // Rebuild rows after toggling
-                    if let Some(ref hierarchy) = self.stats_proto_hierarchy {
-                        self.stats_proto_rows =
-                            protocol::flatten(hierarchy, &self.stats_proto_expanded);
-                        // Clamp selection
-                        if self.stats_proto_selected >= self.stats_proto_rows.len() {
-                            self.stats_proto_selected =
-                                self.stats_proto_rows.len().saturating_sub(1);
+                // Toggle expand/collapse using the node_index stored in the row
+                if let Some(row) = self.stats_proto_rows.get(self.stats_proto_selected) {
+                    let node_index = row.0;
+                    if node_index < self.stats_proto_expanded.len() {
+                        self.stats_proto_expanded[node_index] =
+                            !self.stats_proto_expanded[node_index];
+                        // Rebuild rows after toggling
+                        if let Some(ref hierarchy) = self.stats_proto_hierarchy {
+                            self.stats_proto_rows =
+                                protocol::flatten(hierarchy, &self.stats_proto_expanded);
+                            // Clamp selection
+                            if self.stats_proto_selected >= self.stats_proto_rows.len() {
+                                self.stats_proto_selected =
+                                    self.stats_proto_rows.len().saturating_sub(1);
+                            }
                         }
                     }
                 }
@@ -1701,7 +1709,7 @@ impl App {
     }
 
     fn adjust_stats_conv_scroll(&mut self) {
-        let visible = 20usize; // approximate
+        let visible = self.stats_content_height.max(1);
         if self.stats_conv_selected < self.stats_conv_scroll {
             self.stats_conv_scroll = self.stats_conv_selected;
         } else if self.stats_conv_selected >= self.stats_conv_scroll + visible {
@@ -1752,7 +1760,7 @@ impl App {
     }
 
     fn adjust_stats_ep_scroll(&mut self) {
-        let visible = 20usize;
+        let visible = self.stats_content_height.max(1);
         if self.stats_ep_selected < self.stats_ep_scroll {
             self.stats_ep_scroll = self.stats_ep_selected;
         } else if self.stats_ep_selected >= self.stats_ep_scroll + visible {

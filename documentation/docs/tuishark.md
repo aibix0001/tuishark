@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12"]
 related_mrs: ["!2", "!4", "!7"]
 ---
 
@@ -55,13 +55,14 @@ cargo build --release
 | `w` | Quick save (reuse last path) |
 | `o` | Open file / recent files dialog |
 | `c` | Open interface picker (when not capturing) |
+| `S` (Shift+S) | Open statistics dialog |
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
 | `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
 
 ## Configuration
 
-No configuration file yet — planned for Phase 9.
+No configuration file yet -- planned for Phase 9.
 
 ## Technical Details
 
@@ -180,8 +181,20 @@ TuiShark can use eBPF to identify which process (PID, process name, UID) sent or
 
 **Graceful fallback:** If eBPF is unavailable (no permissions, old kernel, not compiled with the feature), the app continues to work normally — only the Kernel Trace pane shows a status message instead of process info.
 
+### Statistics & analytics (Phase 7)
+
+Press `Shift+S` to open the statistics dialog, a near-full-screen modal overlay with four tabs:
+
+- **Protocol Hierarchy**: tree view of protocol distribution (packet/byte counts, percentages). Expand/collapse with Enter.
+- **Conversations**: bidirectional traffic per IP:port pair. Sort columns with `s`, reverse with `r`.
+- **Endpoints**: per-IP address TX/RX statistics. Sortable columns.
+- **I/O Graph**: sparkline visualization of packet rate over time. Toggle packets/bytes with `b`, adjust granularity with `+`/`-`.
+
+Switch tabs with `Tab`/`Shift+Tab`. Toggle between all packets and filtered-only with `a`. Stats update live during active capture. Close with `Esc`.
+
 ## Changelog
 
+- 2026-03-10: Phase 7 — statistics & analytics: protocol hierarchy, conversations, endpoints, I/O graph
 - 2026-03-10: Phase 6 — eBPF kernel tracing: per-packet process identification
 - 2026-03-10: Phase 5 — display filter engine: expression parser, evaluator, filter bar UI
 - 2026-03-10: Phase 4 — session management: save/open pcap files, recent files, quit confirmation

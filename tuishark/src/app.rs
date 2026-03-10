@@ -78,6 +78,9 @@ pub struct App {
     show_interface_picker: bool,
     available_interfaces: Vec<InterfaceInfo>,
     picker_selected: usize,
+    picker_scroll_offset: usize,
+    // Status/error message
+    status_message: Option<String>,
 }
 
 impl App {
@@ -101,6 +104,8 @@ impl App {
             show_interface_picker: false,
             available_interfaces: Vec::new(),
             picker_selected: 0,
+            picker_scroll_offset: 0,
+            status_message: None,
         }
     }
 
@@ -134,14 +139,12 @@ impl App {
             match events.next()? {
                 Event::Key(key) => self.handle_key(key),
                 Event::Tick => {}
-                _ => {}
+                Event::Mouse(_) | Event::Resize(_, _) => {}
             }
         }
 
-        // Stop capture on exit
-        if let Some(ref mut cap) = self.live_capture {
-            cap.stop();
-        }
+        // Drain remaining packets before dropping capture
+        self.drain_capture_packets();
 
         Ok(())
     }
@@ -153,6 +156,7 @@ impl App {
         self.capture_state = CaptureState::Capturing;
         self.interface_name = Some(interface.to_string());
         self.auto_scroll = true;
+        self.status_message = None;
         Ok(())
     }
 
@@ -160,6 +164,8 @@ impl App {
         if let Some(ref mut cap) = self.live_capture {
             cap.stop();
         }
+        // Drain remaining packets from channel before dropping
+        self.drain_capture_packets();
         self.live_capture = None;
         self.capture_state = CaptureState::Stopped;
     }
@@ -172,12 +178,12 @@ impl App {
         let mut new_packets = false;
         // Drain up to 1000 packets per tick to avoid blocking the UI
         for _ in 0..1000 {
-            match capture.receiver.try_recv() {
-                Ok((summary, raw)) => {
+            match capture.try_recv() {
+                Some((summary, raw)) => {
                     self.store.add(summary, raw);
                     new_packets = true;
                 }
-                Err(_) => break,
+                None => break,
             }
         }
 
@@ -195,6 +201,9 @@ impl App {
         if let Some(ref cap) = self.live_capture {
             if !cap.is_running() && self.capture_state == CaptureState::Capturing {
                 self.capture_state = CaptureState::Stopped;
+                if let Some(err) = cap.error() {
+                    self.status_message = Some(err);
+                }
             }
         }
     }
@@ -204,10 +213,11 @@ impl App {
             Ok(interfaces) => {
                 self.available_interfaces = interfaces;
                 self.picker_selected = 0;
+                self.picker_scroll_offset = 0;
                 self.show_interface_picker = true;
             }
-            Err(_) => {
-                // Can't list interfaces — stay idle
+            Err(e) => {
+                self.status_message = Some(format!("{e:#}"));
                 self.show_interface_picker = false;
             }
         }
@@ -311,6 +321,7 @@ impl App {
             self.store.len(),
             self.selected_packet,
             self.capture_state,
+            self.status_message.as_deref(),
             &self.theme,
         );
         frame.render_widget(status, layout.status_bar);
@@ -320,6 +331,7 @@ impl App {
             let picker = InterfacePicker::new(
                 &self.available_interfaces,
                 self.picker_selected,
+                self.picker_scroll_offset,
                 &self.theme,
             );
             frame.render_widget(picker, frame.area());
@@ -327,6 +339,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // Clear status message on any key press
+        self.status_message = None;
+
         // Interface picker mode
         if self.show_interface_picker {
             self.handle_picker_key(key);
@@ -391,24 +406,30 @@ impl App {
                 if !self.available_interfaces.is_empty() {
                     self.picker_selected =
                         (self.picker_selected + 1).min(self.available_interfaces.len() - 1);
+                    self.adjust_picker_scroll();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.picker_selected = self.picker_selected.saturating_sub(1);
+                self.adjust_picker_scroll();
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.picker_selected = 0;
+                self.picker_scroll_offset = 0;
             }
             KeyCode::End | KeyCode::Char('G') => {
                 if !self.available_interfaces.is_empty() {
                     self.picker_selected = self.available_interfaces.len() - 1;
+                    self.adjust_picker_scroll();
                 }
             }
             KeyCode::Enter => {
                 if let Some(iface) = self.available_interfaces.get(self.picker_selected) {
                     let name = iface.name.clone();
                     self.show_interface_picker = false;
-                    let _ = self.start_capture(&name);
+                    if let Err(e) = self.start_capture(&name) {
+                        self.status_message = Some(format!("{e:#}"));
+                    }
                 }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -421,6 +442,16 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn adjust_picker_scroll(&mut self) {
+        // Approximate visible height for picker (will match render calculation)
+        let picker_visible = 20usize; // conservative default
+        if self.picker_selected < self.picker_scroll_offset {
+            self.picker_scroll_offset = self.picker_selected;
+        } else if self.picker_selected >= self.picker_scroll_offset + picker_visible {
+            self.picker_scroll_offset = self.picker_selected.saturating_sub(picker_visible - 1);
         }
     }
 
@@ -565,5 +596,14 @@ mod tests {
         let app = App::new(None, None);
         assert_eq!(app.capture_state, CaptureState::Idle);
         assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn picker_scroll_adjusts() {
+        let mut app = App::new(None, None);
+        app.picker_selected = 25;
+        app.adjust_picker_scroll();
+        assert!(app.picker_scroll_offset > 0);
+        assert!(app.picker_selected >= app.picker_scroll_offset);
     }
 }

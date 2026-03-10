@@ -22,8 +22,8 @@ struct Cli {
     /// Path to a pcap/pcapng file to open
     file: Option<PathBuf>,
 
-    /// Network interface to capture from
-    #[arg(short = 'i', long = "interface")]
+    /// Network interface to capture from (conflicts with file argument)
+    #[arg(short = 'i', long = "interface", conflicts_with = "file")]
     interface: Option<String>,
 
     /// List available network interfaces and exit

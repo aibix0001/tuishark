@@ -13,6 +13,7 @@ pub struct StatusBar<'a> {
     packet_count: usize,
     selected: Option<usize>,
     capture_state: CaptureState,
+    status_message: Option<&'a str>,
     theme: &'a Theme,
 }
 
@@ -21,12 +22,14 @@ impl<'a> StatusBar<'a> {
         packet_count: usize,
         selected: Option<usize>,
         capture_state: CaptureState,
+        status_message: Option<&'a str>,
         theme: &'a Theme,
     ) -> Self {
         Self {
             packet_count,
             selected,
             capture_state,
+            status_message,
             theme,
         }
     }
@@ -40,10 +43,7 @@ impl Widget for StatusBar<'_> {
         };
 
         let capture_span = match self.capture_state {
-            CaptureState::Idle => Span::styled(
-                "",
-                Style::default(),
-            ),
+            CaptureState::Idle => Span::styled("", Style::default()),
             CaptureState::Capturing => Span::styled(
                 " LIVE ",
                 Style::default()
@@ -80,6 +80,14 @@ impl Widget for StatusBar<'_> {
             spans.push(Span::styled(
                 " ",
                 Style::default().bg(self.theme.surface0),
+            ));
+        }
+
+        // Show error/status message if present
+        if let Some(msg) = self.status_message {
+            spans.push(Span::styled(
+                format!(" {msg} "),
+                Style::default().fg(self.theme.red).bg(self.theme.surface0),
             ));
         }
 

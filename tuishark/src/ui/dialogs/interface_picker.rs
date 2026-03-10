@@ -12,14 +12,21 @@ use crate::ui::theme::Theme;
 pub struct InterfacePicker<'a> {
     interfaces: &'a [InterfaceInfo],
     selected: usize,
+    scroll_offset: usize,
     theme: &'a Theme,
 }
 
 impl<'a> InterfacePicker<'a> {
-    pub fn new(interfaces: &'a [InterfaceInfo], selected: usize, theme: &'a Theme) -> Self {
+    pub fn new(
+        interfaces: &'a [InterfaceInfo],
+        selected: usize,
+        scroll_offset: usize,
+        theme: &'a Theme,
+    ) -> Self {
         Self {
             interfaces,
             selected,
+            scroll_offset,
             theme,
         }
     }
@@ -49,21 +56,33 @@ impl Widget for InterfacePicker<'_> {
 
         // Help line at bottom
         let help_y = inner.y + inner.height.saturating_sub(1);
-        let help = Line::from(vec![
-            Span::styled(
-                " j/k:navigate  Enter:select  Esc:quit ",
-                Style::default().fg(self.theme.subtext0),
-            ),
-        ]);
+        let help = Line::from(Span::styled(
+            " j/k:navigate  Enter:select  Esc:quit ",
+            Style::default().fg(self.theme.subtext0),
+        ));
         buf.set_line(inner.x, help_y, &help, inner.width);
 
-        // Interface list
-        let list_height = inner.height.saturating_sub(1) as usize;
-        for (i, iface) in self.interfaces.iter().enumerate() {
-            if i >= list_height {
-                break;
-            }
+        // Empty list message
+        if self.interfaces.is_empty() {
+            let msg = Line::from(Span::styled(
+                " No interfaces found (need root?)",
+                Style::default().fg(self.theme.red),
+            ));
+            buf.set_line(inner.x, inner.y, &msg, inner.width);
+            return;
+        }
 
+        // Interface list with scroll offset
+        let list_height = inner.height.saturating_sub(1) as usize;
+        let visible_interfaces = self
+            .interfaces
+            .iter()
+            .enumerate()
+            .skip(self.scroll_offset)
+            .take(list_height);
+
+        for (i, iface) in visible_interfaces {
+            let row_index = i - self.scroll_offset;
             let is_selected = i == self.selected;
             let style = if is_selected {
                 Style::default()
@@ -82,15 +101,13 @@ impl Widget for InterfacePicker<'_> {
                 format!(" ({})", iface.description)
             };
 
-            let max_name = (inner.width as usize).saturating_sub(desc.len() + 2);
-            let name = if iface.name.len() > max_name {
-                format!("{}...", &iface.name[..max_name.saturating_sub(3)])
-            } else {
-                iface.name.clone()
-            };
+            let available_width = inner.width as usize;
+            let max_len = available_width.saturating_sub(1); // 1 char leading space
+            let full_text = format!("{}{}", iface.name, desc);
+            let truncated: String = full_text.chars().take(max_len).collect();
+            let line = format!(" {truncated}");
 
-            let line = format!(" {name}{desc}");
-            let row_y = inner.y + i as u16;
+            let row_y = inner.y + row_index as u16;
 
             // Fill row background
             for col in inner.x..inner.x + inner.width {

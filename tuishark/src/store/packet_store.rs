@@ -113,6 +113,14 @@ impl<'a> Iterator for PacketIter<'a> {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = match self.indices {
+            Some(idx) => idx.len().saturating_sub(self.pos),
+            None => self.store.len().saturating_sub(self.pos),
+        };
+        (0, Some(remaining))
+    }
 }
 
 #[cfg(test)]

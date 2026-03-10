@@ -26,6 +26,9 @@ pub struct ProtocolHierarchy {
 }
 
 /// Infer network layer from source address (IPv6 addresses contain ':').
+/// Precondition: only meaningful for packets with an IP layer parsed;
+/// non-IP sources (e.g. MAC addresses) also contain ':' but those code paths
+/// do not use the return value.
 fn infer_network_layer(pkt: &PacketSummary) -> Protocol {
     if pkt.source.contains(':') {
         Protocol::Ipv6
@@ -39,17 +42,10 @@ fn infer_network_layer(pkt: &PacketSummary) -> Protocol {
 fn protocol_layers(pkt: &PacketSummary) -> ([Protocol; 4], usize) {
     let net = infer_network_layer(pkt);
     match &pkt.protocol {
-        // Application-layer: DNS can be over TCP or UDP, infer from port
+        // Application-layer: Protocol::Dns currently only comes from UDP classification
+        // in fast.rs (TCP port 53 is not yet recognized as DNS). Always use UDP transport.
         Protocol::Dns => {
-            let transport = if pkt.src_port == Some(53) || pkt.dst_port == Some(53) {
-                // Check if the underlying transport was TCP by looking at port context
-                // DNS port 53 can be either; default to UDP but use TCP if src_port
-                // suggests a high ephemeral port (typical for TCP DNS queries)
-                Protocol::Udp
-            } else {
-                Protocol::Udp
-            };
-            ([Protocol::Ethernet, net, transport, Protocol::Dns], 4)
+            ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dns], 4)
         }
         Protocol::Http => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Http], 4),
         Protocol::Tls => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Tls], 4),
@@ -154,6 +150,9 @@ fn build_tree(level_counts: &[LevelMap; 4]) -> Vec<ProtoNode> {
             children: Vec::new(),
         };
         for (_key2, (proto2, count2, bytes2)) in &level_counts[1] {
+            if !is_child_of(proto2, proto) {
+                continue;
+            }
             let mut child = ProtoNode {
                 protocol: proto2.clone(),
                 packet_count: *count2,
@@ -209,7 +208,11 @@ fn is_child_of(child: &Protocol, parent: &Protocol) -> bool {
         (Protocol::Dns, Protocol::Tcp) => true,
         // Application under UDP
         (Protocol::Dns, Protocol::Udp) => true,
-        // Unknown under anything at level 1
+        // Network under Ethernet (link → network)
+        (Protocol::Ipv4, Protocol::Ethernet) => true,
+        (Protocol::Ipv6, Protocol::Ethernet) => true,
+        (Protocol::Arp, Protocol::Ethernet) => true,
+        // Unknown under anything
         (Protocol::Unknown(_), _) => true,
         _ => false,
     }

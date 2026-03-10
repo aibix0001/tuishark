@@ -54,14 +54,16 @@ pub fn compute(store: &PacketStore, indices: Option<&[usize]>, num_buckets: usiz
             buckets_packets[0] += 1;
             buckets_bytes[0] += bytes;
         }
+        let max_packets = buckets_packets[0];
+        let max_bytes = buckets_bytes[0];
         return IoGraphData {
-            buckets_packets: buckets_packets.clone(),
-            buckets_bytes: buckets_bytes.clone(),
+            buckets_packets,
+            buckets_bytes,
             bucket_width_secs: 1.0,
             start_time: min_ts,
             end_time: max_ts,
-            max_packets: buckets_packets[0],
-            max_bytes: buckets_bytes[0],
+            max_packets,
+            max_bytes,
         };
     }
 

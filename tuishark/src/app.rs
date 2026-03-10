@@ -297,12 +297,7 @@ impl App {
                 Some(self.store.len().saturating_sub(1))
             };
             if let Some(last) = last_idx {
-                self.selected_packet = Some(last);
-                // Adjust scroll for filtered view
-                let display_len = self.filtered_len();
-                if self.visible_rows > 0 && display_len > self.visible_rows {
-                    self.scroll_offset = display_len.saturating_sub(self.visible_rows);
-                }
+                self.select_packet(last);
             }
         }
 
@@ -1328,8 +1323,9 @@ impl App {
             Err(e) => {
                 self.filter_error = true;
                 self.status_message = Some(format!("Filter error: {e}"));
+                // Keep previous filter active if one exists, only clear text
                 self.active_filter = None;
-                self.active_filter_text = input.to_string();
+                self.active_filter_text.clear();
                 self.filtered_indices = None;
             }
         }
@@ -1342,6 +1338,8 @@ impl App {
         self.filter_cursor_pos = 0;
         self.filter_error = false;
         self.filtered_indices = None;
+        // Reset scroll to keep view consistent
+        self.scroll_offset = 0;
     }
 
     fn rebuild_filtered_indices(&mut self) {
@@ -1349,7 +1347,7 @@ impl App {
             self.filtered_indices = None;
             return;
         };
-        let mut indices = Vec::new();
+        let mut indices = Vec::with_capacity(self.store.len() / 4 + 1);
         for i in 0..self.store.len() {
             if let Some(pkt) = self.store.get(i) {
                 if eval::matches(filter, pkt) {
@@ -1371,16 +1369,21 @@ impl App {
     /// Map a display row position to a store index.
     fn display_to_store_index(&self, display_pos: usize) -> usize {
         match &self.filtered_indices {
-            Some(indices) => indices.get(display_pos).copied().unwrap_or(0),
+            Some(indices) => {
+                // Clamp to valid range to avoid returning wrong packet
+                let clamped = display_pos.min(indices.len().saturating_sub(1));
+                indices.get(clamped).copied().unwrap_or(0)
+            }
             None => display_pos,
         }
     }
 
     /// Find the display position of the currently selected packet.
+    /// Uses binary search since filtered_indices is always sorted.
     fn selected_display_pos(&self) -> Option<usize> {
         let selected = self.selected_packet?;
         match &self.filtered_indices {
-            Some(indices) => indices.iter().position(|&i| i == selected),
+            Some(indices) => indices.binary_search(&selected).ok(),
             None => Some(selected),
         }
     }

@@ -3,6 +3,7 @@
 use crate::dissect::model::PacketSummary;
 use super::ast::{CompareOp, Expr, Field, Value};
 
+#[must_use]
 pub fn matches(expr: &Expr, pkt: &PacketSummary) -> bool {
     match expr {
         Expr::Compare { field, op, value } => eval_compare(field, op, value, pkt),
@@ -22,45 +23,85 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
         Field::PortDst => cmp_port(pkt.dst_port, op, value),
         Field::Port => cmp_port(pkt.src_port, op, value) || cmp_port(pkt.dst_port, op, value),
         Field::Proto => cmp_proto(pkt, op, value),
-        Field::Len => cmp_int(pkt.length as u64, op, value),
+        Field::Len => cmp_int(pkt.original_length as u64, op, value),
         Field::Info => cmp_str(&pkt.info, op, value),
     }
 }
 
+/// Evaluate `contains` — needle is already lowercased at parse time.
 fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
-    let haystack = match field {
-        Field::IpSrc => &pkt.source,
-        Field::IpDst => &pkt.destination,
+    match field {
+        Field::IpSrc => str_contains_lower(&pkt.source, needle),
+        Field::IpDst => str_contains_lower(&pkt.destination, needle),
         Field::IpAddr => {
-            return pkt.source.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
-                || pkt.destination.to_ascii_lowercase().contains(&needle.to_ascii_lowercase());
+            str_contains_lower(&pkt.source, needle)
+                || str_contains_lower(&pkt.destination, needle)
         }
-        Field::Info => &pkt.info,
-        Field::Proto => {
-            let proto_str = pkt.protocol.to_string();
-            return proto_str.to_ascii_lowercase().contains(&needle.to_ascii_lowercase());
-        }
+        Field::Info => str_contains_lower(&pkt.info, needle),
+        Field::Proto => pkt.protocol.contains_lower(needle),
         // contains doesn't make sense for numeric fields, but handle gracefully
-        Field::PortSrc | Field::PortDst | Field::Port | Field::Len => return false,
-    };
-    haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+        Field::PortSrc | Field::PortDst | Field::Port | Field::Len => false,
+    }
+}
+
+/// Case-insensitive contains without heap allocation.
+/// `needle` must already be lowercased.
+fn str_contains_lower(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let needle_bytes = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .any(|window| {
+            window
+                .iter()
+                .zip(needle_bytes)
+                .all(|(h, n)| h.to_ascii_lowercase() == *n)
+        })
 }
 
 fn cmp_str(field_val: &str, op: &CompareOp, value: &Value) -> bool {
     let cmp_val = match value {
         Value::Str(s) => s.as_str(),
         Value::Int(n) => {
+            // Avoid recursion + allocation: compare inline
             let s = n.to_string();
-            return cmp_str(field_val, op, &Value::Str(s));
+            return cmp_str_inner(field_val, op, &s);
         }
     };
+    cmp_str_inner(field_val, op, cmp_val)
+}
+
+/// All string comparisons are case-insensitive for consistency.
+fn cmp_str_inner(field_val: &str, op: &CompareOp, cmp_val: &str) -> bool {
     match op {
         CompareOp::Eq => field_val.eq_ignore_ascii_case(cmp_val),
         CompareOp::Ne => !field_val.eq_ignore_ascii_case(cmp_val),
-        CompareOp::Gt => field_val > cmp_val,
-        CompareOp::Lt => field_val < cmp_val,
-        CompareOp::Ge => field_val >= cmp_val,
-        CompareOp::Le => field_val <= cmp_val,
+        CompareOp::Gt => {
+            let a = field_val.to_ascii_lowercase();
+            let b = cmp_val.to_ascii_lowercase();
+            a > b
+        }
+        CompareOp::Lt => {
+            let a = field_val.to_ascii_lowercase();
+            let b = cmp_val.to_ascii_lowercase();
+            a < b
+        }
+        CompareOp::Ge => {
+            let a = field_val.to_ascii_lowercase();
+            let b = cmp_val.to_ascii_lowercase();
+            a >= b
+        }
+        CompareOp::Le => {
+            let a = field_val.to_ascii_lowercase();
+            let b = cmp_val.to_ascii_lowercase();
+            a <= b
+        }
     }
 }
 
@@ -227,6 +268,46 @@ mod tests {
             dst_port: None,
         };
         let expr = parser::parse("port == 80").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn zero_match_filter() {
+        // Filter that matches nothing should not crash
+        let pkt = sample_pkt();
+        let expr = parser::parse("proto == arp").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn contains_case_insensitive_no_alloc() {
+        // Verify the pre-lowercased needle works
+        assert!(str_contains_lower("Hello World", "hello"));
+        assert!(str_contains_lower("ABCDEF", "cde"));
+        assert!(!str_contains_lower("ABC", "abcd"));
+        assert!(str_contains_lower("anything", ""));
+    }
+
+    #[test]
+    fn ip_addr_contains() {
+        let pkt = sample_pkt();
+        let expr = parser::parse("ip.addr contains \"192.168\"").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("ip.addr contains \"10.0\"").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("ip.addr contains \"8.8.8\"").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn len_uses_original_length() {
+        // Verify len checks original_length (wire length), not captured length
+        let mut pkt = sample_pkt();
+        pkt.length = 96; // truncated capture
+        pkt.original_length = 1500; // wire length
+        let expr = parser::parse("len == 1500").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("len == 96").unwrap();
         assert!(!super::matches(&expr, &pkt));
     }
 }

@@ -67,14 +67,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
         // Two-char operators
         if i + 1 < chars.len() {
-            let two: String = chars[i..=i + 1].iter().collect();
-            match two.as_str() {
-                "==" => { tokens.push(Token::Op(CompareOp::Eq)); i += 2; continue; }
-                "!=" => { tokens.push(Token::Op(CompareOp::Ne)); i += 2; continue; }
-                ">=" => { tokens.push(Token::Op(CompareOp::Ge)); i += 2; continue; }
-                "<=" => { tokens.push(Token::Op(CompareOp::Le)); i += 2; continue; }
-                "&&" => { tokens.push(Token::And); i += 2; continue; }
-                "||" => { tokens.push(Token::Or); i += 2; continue; }
+            match (chars[i], chars[i + 1]) {
+                ('=', '=') => { tokens.push(Token::Op(CompareOp::Eq)); i += 2; continue; }
+                ('!', '=') => { tokens.push(Token::Op(CompareOp::Ne)); i += 2; continue; }
+                ('>', '=') => { tokens.push(Token::Op(CompareOp::Ge)); i += 2; continue; }
+                ('<', '=') => { tokens.push(Token::Op(CompareOp::Le)); i += 2; continue; }
+                ('&', '&') => { tokens.push(Token::And); i += 2; continue; }
+                ('|', '|') => { tokens.push(Token::Or); i += 2; continue; }
                 _ => {}
             }
         }
@@ -209,7 +208,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
             return Err("expected value after 'contains'".into());
         }
         let value = match &tokens[*pos] {
-            Token::Str(s) => s.clone(),
+            Token::Str(s) => s.to_ascii_lowercase(),
             Token::Int(n) => n.to_string(),
             other => return Err(format!("expected string after 'contains', got {other:?}")),
         };
@@ -300,7 +299,7 @@ mod tests {
             expr,
             Expr::Contains {
                 field: Field::Info,
-                value: "SYN".into(),
+                value: "syn".into(), // pre-lowercased at parse time
             }
         );
     }

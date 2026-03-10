@@ -1,6 +1,6 @@
 /// Filter expression AST.
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     /// Field comparison: `ip.src == 192.168.1.1`
     Compare {
@@ -9,6 +9,7 @@ pub enum Expr {
         value: Value,
     },
     /// String containment: `info contains "SYN"`
+    /// The value is stored pre-lowercased for O(1) case-insensitive matching.
     Contains {
         field: Field,
         value: String,
@@ -21,7 +22,7 @@ pub enum Expr {
     Not(Box<Expr>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
     IpSrc,
     IpDst,
@@ -34,7 +35,7 @@ pub enum Field {
     Info,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -44,7 +45,7 @@ pub enum CompareOp {
     Le,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Str(String),
     Int(u64),

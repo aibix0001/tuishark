@@ -45,12 +45,35 @@ impl Protocol {
             Protocol::Arp => s_lower == "arp",
             Protocol::Dns => s_lower == "dns",
             Protocol::Http => s_lower == "http",
-            Protocol::Tls => s_lower == "tls",
+            Protocol::Tls => s_lower == "tls" || s_lower == "https",
             Protocol::Ipv4 => s_lower == "ipv4" || s_lower == "ip",
             Protocol::Ipv6 => s_lower == "ipv6",
             Protocol::Ethernet => s_lower == "ethernet" || s_lower == "eth",
             Protocol::Unknown(name) => name.to_ascii_lowercase() == s_lower,
         }
+    }
+
+    /// Case-insensitive substring check without heap allocation.
+    /// `needle` must already be lowercased.
+    pub fn contains_lower(&self, needle: &str) -> bool {
+        let name = match self {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+            Protocol::Icmp => "icmp",
+            Protocol::Icmpv6 => "icmpv6",
+            Protocol::Arp => "arp",
+            Protocol::Dns => "dns",
+            Protocol::Http => "http",
+            Protocol::Tls => "tls",
+            Protocol::Ipv4 => "ipv4",
+            Protocol::Ipv6 => "ipv6",
+            Protocol::Ethernet => "ethernet",
+            Protocol::Unknown(s) => {
+                // Unknown names may have mixed case
+                return s.to_ascii_lowercase().contains(needle);
+            }
+        };
+        name.contains(needle)
     }
 }
 

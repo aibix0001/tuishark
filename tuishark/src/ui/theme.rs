@@ -1,6 +1,7 @@
 use catppuccin::PALETTE;
 use ratatui::style::Color;
 
+use crate::config::theme::CatppuccinFlavor;
 use crate::dissect::model::Protocol;
 
 pub struct Theme {
@@ -23,6 +24,7 @@ pub struct Theme {
     pub flamingo: Color,
     pub teal: Color,
     pub lavender: Color,
+    pub flavor: CatppuccinFlavor,
 }
 
 fn cc(c: catppuccin::Color) -> Color {
@@ -30,28 +32,62 @@ fn cc(c: catppuccin::Color) -> Color {
 }
 
 impl Theme {
-    pub fn mocha() -> Self {
-        let m = PALETTE.mocha.colors;
+    fn from_palette(colors: catppuccin::FlavorColors, flavor: CatppuccinFlavor) -> Self {
         Self {
-            base: cc(m.base),
-            mantle: cc(m.mantle),
-            surface0: cc(m.surface0),
-            surface1: cc(m.surface1),
-            surface2: cc(m.surface2),
-            text: cc(m.text),
-            subtext0: cc(m.subtext0),
-            subtext1: cc(m.subtext1),
-            overlay0: cc(m.overlay0),
-            blue: cc(m.blue),
-            green: cc(m.green),
-            yellow: cc(m.yellow),
-            red: cc(m.red),
-            mauve: cc(m.mauve),
-            peach: cc(m.peach),
-            pink: cc(m.pink),
-            flamingo: cc(m.flamingo),
-            teal: cc(m.teal),
-            lavender: cc(m.lavender),
+            base: cc(colors.base),
+            mantle: cc(colors.mantle),
+            surface0: cc(colors.surface0),
+            surface1: cc(colors.surface1),
+            surface2: cc(colors.surface2),
+            text: cc(colors.text),
+            subtext0: cc(colors.subtext0),
+            subtext1: cc(colors.subtext1),
+            overlay0: cc(colors.overlay0),
+            blue: cc(colors.blue),
+            green: cc(colors.green),
+            yellow: cc(colors.yellow),
+            red: cc(colors.red),
+            mauve: cc(colors.mauve),
+            peach: cc(colors.peach),
+            pink: cc(colors.pink),
+            flamingo: cc(colors.flamingo),
+            teal: cc(colors.teal),
+            lavender: cc(colors.lavender),
+            flavor,
+        }
+    }
+
+    pub fn mocha() -> Self {
+        Self::from_palette(PALETTE.mocha.colors, CatppuccinFlavor::Mocha)
+    }
+
+    pub fn macchiato() -> Self {
+        Self::from_palette(PALETTE.macchiato.colors, CatppuccinFlavor::Macchiato)
+    }
+
+    pub fn frappe() -> Self {
+        Self::from_palette(PALETTE.frappe.colors, CatppuccinFlavor::Frappe)
+    }
+
+    pub fn latte() -> Self {
+        Self::from_palette(PALETTE.latte.colors, CatppuccinFlavor::Latte)
+    }
+
+    pub fn from_flavor(flavor: CatppuccinFlavor) -> Self {
+        match flavor {
+            CatppuccinFlavor::Mocha => Self::mocha(),
+            CatppuccinFlavor::Macchiato => Self::macchiato(),
+            CatppuccinFlavor::Frappe => Self::frappe(),
+            CatppuccinFlavor::Latte => Self::latte(),
+        }
+    }
+
+    pub fn flavor_name(&self) -> &'static str {
+        match self.flavor {
+            CatppuccinFlavor::Mocha => "Mocha",
+            CatppuccinFlavor::Macchiato => "Macchiato",
+            CatppuccinFlavor::Frappe => "Frappé",
+            CatppuccinFlavor::Latte => "Latte",
         }
     }
 

@@ -13,6 +13,7 @@ pub struct HexView<'a> {
     highlight_range: Option<(usize, usize)>,
     theme: &'a Theme,
     focused: bool,
+    uppercase: bool,
 }
 
 impl<'a> HexView<'a> {
@@ -21,12 +22,14 @@ impl<'a> HexView<'a> {
         highlight_range: Option<(usize, usize)>,
         theme: &'a Theme,
         focused: bool,
+        uppercase: bool,
     ) -> Self {
         Self {
             data,
             highlight_range,
             theme,
             focused,
+            uppercase,
         }
     }
 }
@@ -85,7 +88,11 @@ impl Widget for HexView<'_> {
                     hex_spans.push(Span::styled(separator.to_string(), normal_hex_style));
                 }
 
-                let hex_str = format!("{:02x} ", b);
+                let hex_str = if self.uppercase {
+                    format!("{:02X} ", b)
+                } else {
+                    format!("{:02x} ", b)
+                };
                 let style = if is_highlighted { hl_style } else { normal_hex_style };
                 hex_spans.push(Span::styled(hex_str, style));
             }

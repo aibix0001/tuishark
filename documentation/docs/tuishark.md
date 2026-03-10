@@ -3,13 +3,13 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15"]
 related_mrs: ["!2", "!4", "!7"]
 ---
 
 ## Overview
 
-TuiShark is a modern terminal-based packet analyzer built in Rust. It provides a Wireshark-style interface for inspecting network traffic directly in the terminal, with Catppuccin Mocha theming and vim-style keyboard navigation.
+TuiShark is a modern terminal-based packet analyzer built in Rust. It provides a Wireshark-style interface for inspecting network traffic directly in the terminal, with configurable Catppuccin theming and vim-style keyboard navigation.
 
 ## Usage
 
@@ -59,11 +59,88 @@ cargo build --release
 | `e` | Open export dialog (CSV, JSON, Text) |
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
+| `p` | Open filter presets picker |
 | `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
 
-## Configuration
+## Configuration (Phase 9)
 
-No configuration file yet -- planned for Phase 9.
+TuiShark reads its configuration from `~/.config/tuishark/config.toml` at startup. The file is optional — all settings have sensible defaults matching the pre-config behavior.
+
+### Example config
+
+```toml
+[theme]
+flavor = "macchiato"    # mocha (default), macchiato, frappe, latte
+
+[display]
+timestamp_format = "absolute"  # relative (default), absolute, epoch
+hex_uppercase = true           # true (default), false
+auto_scroll = true             # auto-scroll during live capture
+
+[columns]
+visible = ["no", "time", "source", "destination", "protocol", "length", "info"]
+
+[keys]
+quit = "Ctrl+q"
+filter = "/"
+save = "s"
+export = "e"
+stats = "Shift+S"
+filter_presets = "p"
+
+[capture]
+default_interface = ""    # empty = show picker
+promiscuous = true
+snap_length = 65535
+
+[export]
+default_format = "csv"    # csv, json, text
+default_directory = "."
+
+[[filter]]
+name = "HTTP traffic"
+expression = "proto == http or proto == https"
+
+[[filter]]
+name = "DNS only"
+expression = "proto == dns"
+description = "Show DNS queries and responses"
+
+[[filter]]
+name = "Large packets"
+expression = "len > 1000"
+```
+
+### Key bindings
+
+All keyboard shortcuts are configurable under the `[keys]` section. Key strings support modifiers: `Ctrl+`, `Shift+`, `Alt+`, and named keys: `Tab`, `Esc`, `Enter`, `PageDown`, `PageUp`, `Home`, `End`, `Backspace`, `Delete`, `F1`–`F12`, arrow keys (`Up`, `Down`, `Left`, `Right`).
+
+Invalid key bindings are logged as warnings and fall back to defaults.
+
+### Filter presets
+
+Define named filter expressions as `[[filter]]` entries. Press `p` to open the preset picker popup, navigate with `j`/`k`, and press `Enter` to apply. Each preset has a `name`, `expression`, and optional `description`.
+
+### Catppuccin themes
+
+Set `[theme] flavor` to one of the four Catppuccin flavors:
+
+| Flavor | Description |
+|--------|-------------|
+| `mocha` | Dark theme with warm tones (default) |
+| `macchiato` | Dark theme with slightly cooler tones |
+| `frappe` | Mid-tone theme |
+| `latte` | Light theme |
+
+### Timestamp formats
+
+Set `[display] timestamp_format` to control the time column in the packet table:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `relative` | `0.000123` | Seconds since first packet (default) |
+| `absolute` | `2026-03-10 14:30:05.000123` | UTC date and time (YYYY-MM-DD HH:MM:SS.us) |
+| `epoch` | `1710085805.000123` | Unix epoch seconds |
 
 ## Technical Details
 
@@ -214,6 +291,7 @@ When a display filter is active, only matching packets are exported by default. 
 
 ## Changelog
 
+- 2026-03-10: Phase 9 — configuration system: TOML config, themes, keybindings, filter presets, display preferences
 - 2026-03-10: Phase 8 — packet export: CSV, JSON, and plain text formats with filter-aware dialog
 - 2026-03-10: Phase 7 — statistics & analytics: protocol hierarchy, conversations, endpoints, I/O graph
 - 2026-03-10: Phase 6 — eBPF kernel tracing: per-packet process identification

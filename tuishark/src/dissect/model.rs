@@ -11,9 +11,13 @@ pub struct PacketSummary {
     /// Original wire length (may differ from `length` if packet was truncated by snaplen).
     pub original_length: usize,
     pub info: String,
+    /// Source port (TCP/UDP only, None for other protocols).
+    pub src_port: Option<u16>,
+    /// Destination port (TCP/UDP only, None for other protocols).
+    pub dst_port: Option<u16>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Protocol {
     Tcp,
     Udp,
@@ -27,6 +31,27 @@ pub enum Protocol {
     Ipv6,
     Ethernet,
     Unknown(String),
+}
+
+impl Protocol {
+    /// Case-insensitive match against a protocol name string.
+    pub fn matches_str(&self, s: &str) -> bool {
+        let s_lower = s.to_ascii_lowercase();
+        match self {
+            Protocol::Tcp => s_lower == "tcp",
+            Protocol::Udp => s_lower == "udp",
+            Protocol::Icmp => s_lower == "icmp",
+            Protocol::Icmpv6 => s_lower == "icmpv6",
+            Protocol::Arp => s_lower == "arp",
+            Protocol::Dns => s_lower == "dns",
+            Protocol::Http => s_lower == "http",
+            Protocol::Tls => s_lower == "tls",
+            Protocol::Ipv4 => s_lower == "ipv4" || s_lower == "ip",
+            Protocol::Ipv6 => s_lower == "ipv6",
+            Protocol::Ethernet => s_lower == "ethernet" || s_lower == "eth",
+            Protocol::Unknown(name) => name.to_ascii_lowercase() == s_lower,
+        }
+    }
 }
 
 impl fmt::Display for Protocol {

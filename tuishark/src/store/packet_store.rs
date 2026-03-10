@@ -89,6 +89,8 @@ mod tests {
             length: 64,
             original_length: 64,
             info: "test".into(),
+            src_port: Some(12345),
+            dst_port: Some(80),
         };
         (summary, raw)
     }

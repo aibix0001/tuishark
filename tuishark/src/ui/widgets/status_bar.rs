@@ -15,6 +15,7 @@ pub struct StatusBar<'a> {
     capture_state: CaptureState,
     dissect_state: DissectState,
     status_message: Option<&'a str>,
+    filter_match: Option<(usize, usize)>, // (matched, total)
     theme: &'a Theme,
 }
 
@@ -25,6 +26,7 @@ impl<'a> StatusBar<'a> {
         capture_state: CaptureState,
         dissect_state: DissectState,
         status_message: Option<&'a str>,
+        filter_match: Option<(usize, usize)>,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -33,6 +35,7 @@ impl<'a> StatusBar<'a> {
             capture_state,
             dissect_state,
             status_message,
+            filter_match,
             theme,
         }
     }
@@ -106,6 +109,21 @@ impl Widget for StatusBar<'_> {
 
         if self.dissect_state != DissectState::Fast {
             spans.push(dissect_span);
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(self.theme.surface0),
+            ));
+        }
+
+        // Filter match count
+        if let Some((matched, total)) = self.filter_match {
+            spans.push(Span::styled(
+                format!(" FILTER: {matched}/{total} "),
+                Style::default()
+                    .fg(self.theme.base)
+                    .bg(self.theme.green)
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(
                 " ",
                 Style::default().bg(self.theme.surface0),

@@ -7,7 +7,7 @@ use crate::capture::live::{list_interfaces, InterfaceInfo, LiveCapture};
 use crate::capture::save::save_pcap;
 use crate::dissect::deep::next_request_seq;
 use crate::dissect::fast::dissect_detail;
-use crate::dissect::model::PacketDetail;
+use crate::dissect::model::{PacketDetail, PacketSummary};
 use crate::dissect::worker::{DissectRequest, DissectWorker};
 use crate::event::{Event, EventHandler};
 use crate::session::recent::RecentFiles;
@@ -22,7 +22,11 @@ use crate::ui::theme::Theme;
 use crate::ui::widgets::detail_tree::DetailTree;
 use crate::ui::widgets::hex_view::HexView;
 use crate::ui::widgets::packet_table::PacketTable;
+use crate::ui::widgets::filter_bar::FilterBar;
 use crate::ui::widgets::status_bar::StatusBar;
+use crate::filter::ast::Expr;
+use crate::filter::eval;
+use crate::filter::parser;
 
 use ratatui::{
     style::{Modifier, Style},
@@ -119,6 +123,14 @@ pub struct App {
     quit_after_save: bool,
     last_save_path: Option<PathBuf>,
     enable_deep: bool,
+    // Filter engine (Phase 5)
+    filter_editing: bool,
+    filter_input: String,
+    filter_cursor_pos: usize,
+    active_filter: Option<Expr>,
+    active_filter_text: String,
+    filter_error: bool,
+    filtered_indices: Option<Vec<usize>>,
 }
 
 impl App {
@@ -176,6 +188,14 @@ impl App {
             quit_after_save: false,
             last_save_path: None,
             enable_deep,
+            // Filter engine
+            filter_editing: false,
+            filter_input: String::new(),
+            filter_cursor_pos: 0,
+            active_filter: None,
+            active_filter_text: String::new(),
+            filter_error: false,
+            filtered_indices: None,
         }
     }
 
@@ -253,6 +273,15 @@ impl App {
         for _ in 0..1000 {
             match capture.try_recv() {
                 Some((summary, raw)) => {
+                    let pkt_index = summary.index;
+                    // Incrementally update filtered indices for new packet
+                    if let Some(ref filter) = self.active_filter {
+                        if eval::matches(filter, &summary) {
+                            if let Some(ref mut indices) = self.filtered_indices {
+                                indices.push(pkt_index);
+                            }
+                        }
+                    }
                     self.store.add(summary, raw);
                     new_packets = true;
                 }
@@ -262,11 +291,18 @@ impl App {
 
         // Auto-scroll: select the last packet if following tail
         if new_packets && self.auto_scroll {
-            let last = self.store.len().saturating_sub(1);
-            self.selected_packet = Some(last);
-            // Adjust scroll to keep last packet visible
-            if self.visible_rows > 0 && last >= self.scroll_offset + self.visible_rows {
-                self.scroll_offset = last.saturating_sub(self.visible_rows - 1);
+            let last_idx = if let Some(ref indices) = self.filtered_indices {
+                indices.last().copied()
+            } else {
+                Some(self.store.len().saturating_sub(1))
+            };
+            if let Some(last) = last_idx {
+                self.selected_packet = Some(last);
+                // Adjust scroll for filtered view
+                let display_len = self.filtered_len();
+                if self.visible_rows > 0 && display_len > self.visible_rows {
+                    self.scroll_offset = display_len.saturating_sub(self.visible_rows);
+                }
             }
         }
 
@@ -426,10 +462,28 @@ impl App {
             .style(Style::default().bg(self.theme.mantle));
         frame.render_widget(header_widget, layout.header);
 
+        // Filter bar
+        let filter_match = self.filtered_indices.as_ref().map(|fi| (fi.len(), self.store.len()));
+        let active_display = if self.active_filter.is_some() {
+            Some(self.active_filter_text.as_str())
+        } else {
+            None
+        };
+        let filter_bar = FilterBar::new(
+            &self.filter_input,
+            self.filter_cursor_pos,
+            self.filter_editing,
+            active_display,
+            filter_match,
+            self.filter_error,
+            &self.theme,
+        );
+        frame.render_widget(filter_bar, layout.filter_bar);
+
         // Packet table -- virtual scroll: only render visible rows
-        let visible = self.store.get_range(self.scroll_offset, self.visible_rows);
+        let visible_packets = self.get_visible_packets();
         let table = PacketTable::new(
-            visible,
+            &visible_packets,
             self.selected_packet,
             &self.theme,
             self.active_pane == Pane::PacketTable,
@@ -472,12 +526,14 @@ impl App {
         frame.render_widget(trace_placeholder, layout.bottom_right);
 
         // Status bar
+        let filter_match = self.filtered_indices.as_ref().map(|fi| (fi.len(), self.store.len()));
         let status = StatusBar::new(
             self.store.len(),
             self.selected_packet,
             self.capture_state,
             self.dissect_state,
             self.status_message.as_deref(),
+            filter_match,
             &self.theme,
         );
         frame.render_widget(status, layout.status_bar);
@@ -534,6 +590,10 @@ impl App {
         }
         if self.show_interface_picker {
             self.handle_picker_key(key);
+            return;
+        }
+        if self.filter_editing {
+            self.handle_filter_key(key);
             return;
         }
 
@@ -594,6 +654,10 @@ impl App {
             }
             (_, KeyCode::Char('f')) if self.capture_state == CaptureState::Capturing => {
                 self.auto_scroll = !self.auto_scroll;
+                return;
+            }
+            (_, KeyCode::Char('/')) => {
+                self.start_filter_edit();
                 return;
             }
             _ => {}
@@ -663,7 +727,8 @@ impl App {
     }
 
     fn handle_packet_table_key(&mut self, key: KeyEvent) {
-        if self.store.is_empty() {
+        let display_len = self.filtered_len();
+        if display_len == 0 {
             return;
         }
 
@@ -685,43 +750,29 @@ impl App {
             self.auto_scroll = false;
         }
 
-        match key.code {
+        // Find current display position
+        let current_display_pos = self.selected_display_pos();
+
+        let new_display_pos = match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                let next = self
-                    .selected_packet
-                    .map(|i| (i + 1).min(self.store.len() - 1))
-                    .unwrap_or(0);
-                self.select_packet(next);
+                current_display_pos.map(|p| (p + 1).min(display_len - 1)).unwrap_or(0)
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let prev = self
-                    .selected_packet
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or(0);
-                self.select_packet(prev);
+                current_display_pos.map(|p| p.saturating_sub(1)).unwrap_or(0)
             }
-            KeyCode::Char('g') | KeyCode::Home => {
-                self.select_packet(0);
-            }
-            KeyCode::Char('G') | KeyCode::End => {
-                self.select_packet(self.store.len() - 1);
-            }
+            KeyCode::Char('g') | KeyCode::Home => 0,
+            KeyCode::Char('G') | KeyCode::End => display_len - 1,
             KeyCode::PageDown => {
-                let next = self
-                    .selected_packet
-                    .map(|i| (i + 20).min(self.store.len() - 1))
-                    .unwrap_or(0);
-                self.select_packet(next);
+                current_display_pos.map(|p| (p + 20).min(display_len - 1)).unwrap_or(0)
             }
             KeyCode::PageUp => {
-                let prev = self
-                    .selected_packet
-                    .map(|i| i.saturating_sub(20))
-                    .unwrap_or(0);
-                self.select_packet(prev);
+                current_display_pos.map(|p| p.saturating_sub(20)).unwrap_or(0)
             }
-            _ => {}
-        }
+            _ => return,
+        };
+
+        let store_index = self.display_to_store_index(new_display_pos);
+        self.select_packet(store_index);
     }
 
     fn handle_detail_tree_key(&mut self, key: KeyEvent) {
@@ -844,11 +895,13 @@ impl App {
             }
         }
 
-        // Adjust scroll offset to keep selected packet visible
-        if index < self.scroll_offset {
-            self.scroll_offset = index;
-        } else if self.visible_rows > 0 && index >= self.scroll_offset + self.visible_rows {
-            self.scroll_offset = index - self.visible_rows + 1;
+        // Adjust scroll offset to keep selected packet visible (using display position)
+        if let Some(display_pos) = self.selected_display_pos() {
+            if display_pos < self.scroll_offset {
+                self.scroll_offset = display_pos;
+            } else if self.visible_rows > 0 && display_pos >= self.scroll_offset + self.visible_rows {
+                self.scroll_offset = display_pos - self.visible_rows + 1;
+            }
         }
     }
 
@@ -958,6 +1011,7 @@ impl App {
         self.capture_state = CaptureState::Idle;
         self.interface_name = None;
         self.live_capture = None;
+        self.clear_filter();
 
         // Restart deep dissection worker if needed
         if self.enable_deep && self.dissect_worker.is_none() {
@@ -1189,6 +1243,162 @@ impl App {
                 self.quit_after_save = false;
             }
             _ => {}
+        }
+    }
+
+    // --- Filter engine methods ---
+
+    fn start_filter_edit(&mut self) {
+        self.filter_editing = true;
+        self.filter_input = self.active_filter_text.clone();
+        self.filter_cursor_pos = self.filter_input.chars().count();
+        self.filter_error = false;
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.filter_editing = false;
+                let input = self.filter_input.trim().to_string();
+                if input.is_empty() {
+                    self.clear_filter();
+                } else {
+                    self.apply_filter(&input);
+                }
+            }
+            KeyCode::Esc => {
+                self.filter_editing = false;
+                self.filter_error = false;
+                // Restore previous filter text
+                self.filter_input = self.active_filter_text.clone();
+            }
+            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                let byte_idx = char_to_byte_index(&self.filter_input, self.filter_cursor_pos);
+                self.filter_input.insert(byte_idx, c);
+                self.filter_cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if self.filter_cursor_pos > 0 {
+                    let byte_idx = char_to_byte_index(&self.filter_input, self.filter_cursor_pos - 1);
+                    self.filter_input.remove(byte_idx);
+                    self.filter_cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = self.filter_input.chars().count();
+                if self.filter_cursor_pos < char_count {
+                    let byte_idx = char_to_byte_index(&self.filter_input, self.filter_cursor_pos);
+                    self.filter_input.remove(byte_idx);
+                }
+            }
+            KeyCode::Left => {
+                self.filter_cursor_pos = self.filter_cursor_pos.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_count = self.filter_input.chars().count();
+                self.filter_cursor_pos = (self.filter_cursor_pos + 1).min(char_count);
+            }
+            KeyCode::Home => {
+                self.filter_cursor_pos = 0;
+            }
+            KeyCode::End => {
+                self.filter_cursor_pos = self.filter_input.chars().count();
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_filter(&mut self, input: &str) {
+        match parser::parse(input) {
+            Ok(expr) => {
+                self.active_filter_text = input.to_string();
+                self.filter_error = false;
+                self.active_filter = Some(expr);
+                self.rebuild_filtered_indices();
+                // Reset scroll and selection to first match
+                self.scroll_offset = 0;
+                if let Some(ref indices) = self.filtered_indices {
+                    self.selected_packet = indices.first().copied();
+                    if let Some(idx) = self.selected_packet {
+                        // Trigger dissection for first match
+                        self.select_packet(idx);
+                    }
+                }
+            }
+            Err(e) => {
+                self.filter_error = true;
+                self.status_message = Some(format!("Filter error: {e}"));
+                self.active_filter = None;
+                self.active_filter_text = input.to_string();
+                self.filtered_indices = None;
+            }
+        }
+    }
+
+    fn clear_filter(&mut self) {
+        self.active_filter = None;
+        self.active_filter_text.clear();
+        self.filter_input.clear();
+        self.filter_cursor_pos = 0;
+        self.filter_error = false;
+        self.filtered_indices = None;
+    }
+
+    fn rebuild_filtered_indices(&mut self) {
+        let Some(ref filter) = self.active_filter else {
+            self.filtered_indices = None;
+            return;
+        };
+        let mut indices = Vec::new();
+        for i in 0..self.store.len() {
+            if let Some(pkt) = self.store.get(i) {
+                if eval::matches(filter, pkt) {
+                    indices.push(i);
+                }
+            }
+        }
+        self.filtered_indices = Some(indices);
+    }
+
+    /// Number of packets visible in the current view (filtered or total).
+    fn filtered_len(&self) -> usize {
+        match &self.filtered_indices {
+            Some(indices) => indices.len(),
+            None => self.store.len(),
+        }
+    }
+
+    /// Map a display row position to a store index.
+    fn display_to_store_index(&self, display_pos: usize) -> usize {
+        match &self.filtered_indices {
+            Some(indices) => indices.get(display_pos).copied().unwrap_or(0),
+            None => display_pos,
+        }
+    }
+
+    /// Find the display position of the currently selected packet.
+    fn selected_display_pos(&self) -> Option<usize> {
+        let selected = self.selected_packet?;
+        match &self.filtered_indices {
+            Some(indices) => indices.iter().position(|&i| i == selected),
+            None => Some(selected),
+        }
+    }
+
+    /// Get the visible packets for the current scroll offset and view.
+    fn get_visible_packets(&self) -> Vec<PacketSummary> {
+        match &self.filtered_indices {
+            Some(indices) => {
+                let start = self.scroll_offset.min(indices.len());
+                let end = (self.scroll_offset + self.visible_rows).min(indices.len());
+                indices[start..end]
+                    .iter()
+                    .filter_map(|&i| self.store.get(i).cloned())
+                    .collect()
+            }
+            None => {
+                self.store.get_range(self.scroll_offset, self.visible_rows).to_vec()
+            }
         }
     }
 }

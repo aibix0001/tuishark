@@ -53,8 +53,8 @@ impl PacketStore {
         }
     }
 
-    pub fn first_absolute_ts(&self) -> f64 {
-        self.first_absolute_ts.unwrap_or(0.0)
+    pub fn first_absolute_ts(&self) -> Option<f64> {
+        self.first_absolute_ts
     }
 
     pub fn is_modified(&self) -> bool {
@@ -87,6 +87,7 @@ mod tests {
             destination: "10.0.0.2".into(),
             protocol: Protocol::Tcp,
             length: 64,
+            original_length: 64,
             info: "test".into(),
         };
         (summary, raw)
@@ -158,14 +159,14 @@ mod tests {
     #[test]
     fn absolute_timestamp() {
         let mut store = PacketStore::default();
-        assert_eq!(store.first_absolute_ts(), 0.0);
+        assert!(store.first_absolute_ts().is_none());
 
         store.set_first_absolute_ts(1710000000.0);
-        assert_eq!(store.first_absolute_ts(), 1710000000.0);
+        assert_eq!(store.first_absolute_ts(), Some(1710000000.0));
 
         // Should not overwrite once set
         store.set_first_absolute_ts(9999.0);
-        assert_eq!(store.first_absolute_ts(), 1710000000.0);
+        assert_eq!(store.first_absolute_ts(), Some(1710000000.0));
     }
 
     #[test]
@@ -179,6 +180,6 @@ mod tests {
         store.clear();
         assert!(store.is_empty());
         assert!(!store.is_modified());
-        assert_eq!(store.first_absolute_ts(), 0.0);
+        assert!(store.first_absolute_ts().is_none());
     }
 }

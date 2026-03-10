@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
 
-use crate::dissect::fast::parse_packet;
+use crate::dissect::fast::parse_packet_with_wire_len;
 use crate::dissect::model::PacketSummary;
 
 /// Channel capacity for packets between capture thread and UI.
@@ -154,8 +154,9 @@ fn capture_loop(
                     }
                 };
 
+                let original_length = packet.header.len as usize;
                 let raw = packet.data.to_vec();
-                let summary = parse_packet(index, relative_ts, &raw);
+                let summary = parse_packet_with_wire_len(index, relative_ts, &raw, original_length);
                 index += 1;
 
                 // Bounded channel: if full, drop packet (backpressure)

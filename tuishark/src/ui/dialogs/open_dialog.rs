@@ -172,8 +172,11 @@ impl Widget for OpenDialog<'_> {
 
                 let path_str = entry.path.display().to_string();
                 let max_len = inner.width.saturating_sub(2) as usize;
-                let truncated: String = if path_str.len() > max_len {
-                    format!("...{}", &path_str[path_str.len() - max_len + 3..])
+                let char_count = path_str.chars().count();
+                let truncated: String = if char_count > max_len {
+                    let skip = char_count - max_len + 3;
+                    let tail: String = path_str.chars().skip(skip).collect();
+                    format!("...{tail}")
                 } else {
                     path_str
                 };

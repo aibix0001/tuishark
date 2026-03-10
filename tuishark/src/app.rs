@@ -116,6 +116,7 @@ pub struct App {
     open_scroll_offset: usize,
     recent_files: RecentFiles,
     show_quit_confirm: bool,
+    quit_after_save: bool,
     last_save_path: Option<PathBuf>,
     enable_deep: bool,
 }
@@ -172,6 +173,7 @@ impl App {
             open_scroll_offset: 0,
             recent_files: RecentFiles::load(),
             show_quit_confirm: false,
+            quit_after_save: false,
             last_save_path: None,
             enable_deep,
         }
@@ -537,7 +539,12 @@ impl App {
 
         // Global shortcuts
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                // Ctrl+C always force-quits immediately
+                self.running = false;
+                return;
+            }
+            (_, KeyCode::Char('q')) => {
                 self.try_quit();
                 return;
             }
@@ -885,7 +892,7 @@ impl App {
         } else {
             Self::default_save_filename()
         };
-        self.save_cursor_pos = self.save_filename.len();
+        self.save_cursor_pos = self.save_filename.chars().count();
         self.show_save_dialog = true;
     }
 
@@ -986,42 +993,54 @@ impl App {
     fn handle_save_dialog_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
-                self.save_filename.insert(self.save_cursor_pos, c);
+                let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos);
+                self.save_filename.insert(byte_idx, c);
                 self.save_cursor_pos += 1;
             }
             KeyCode::Backspace => {
                 if self.save_cursor_pos > 0 {
-                    self.save_filename.remove(self.save_cursor_pos - 1);
+                    let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos - 1);
+                    self.save_filename.remove(byte_idx);
                     self.save_cursor_pos -= 1;
                 }
             }
             KeyCode::Delete => {
-                if self.save_cursor_pos < self.save_filename.len() {
-                    self.save_filename.remove(self.save_cursor_pos);
+                let char_count = self.save_filename.chars().count();
+                if self.save_cursor_pos < char_count {
+                    let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos);
+                    self.save_filename.remove(byte_idx);
                 }
             }
             KeyCode::Left => {
                 self.save_cursor_pos = self.save_cursor_pos.saturating_sub(1);
             }
             KeyCode::Right => {
-                self.save_cursor_pos = (self.save_cursor_pos + 1).min(self.save_filename.len());
+                let char_count = self.save_filename.chars().count();
+                self.save_cursor_pos = (self.save_cursor_pos + 1).min(char_count);
             }
             KeyCode::Home => {
                 self.save_cursor_pos = 0;
             }
             KeyCode::End => {
-                self.save_cursor_pos = self.save_filename.len();
+                self.save_cursor_pos = self.save_filename.chars().count();
             }
             KeyCode::Enter => {
-                let filename = self.save_filename.clone();
+                let filename = self.save_filename.trim().to_string();
                 self.show_save_dialog = false;
                 if !filename.is_empty() {
                     let path = PathBuf::from(&filename);
                     self.do_save(&path);
+                    if self.quit_after_save {
+                        self.quit_after_save = false;
+                        self.running = false;
+                    }
+                } else {
+                    self.quit_after_save = false;
                 }
             }
             KeyCode::Esc => {
                 self.show_save_dialog = false;
+                self.quit_after_save = false;
             }
             _ => {}
         }
@@ -1041,7 +1060,6 @@ impl App {
                 self.show_open_dialog = false;
             }
             KeyCode::Enter => {
-                self.show_open_dialog = false;
                 let path = match self.open_mode {
                     OpenDialogMode::TextInput => {
                         if self.open_input.is_empty() {
@@ -1057,6 +1075,13 @@ impl App {
                         }
                     }
                 };
+                self.show_open_dialog = false;
+                // Warn about unsaved data (lost on open)
+                if self.store.is_modified() {
+                    self.status_message = Some(
+                        "Warning: unsaved packets discarded".into(),
+                    );
+                }
                 if let Err(e) = self.do_open_file(&path) {
                     self.status_message = Some(format!("Open failed: {e:#}"));
                 }
@@ -1071,31 +1096,36 @@ impl App {
     fn handle_open_text_input(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
-                self.open_input.insert(self.open_cursor_pos, c);
+                let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos);
+                self.open_input.insert(byte_idx, c);
                 self.open_cursor_pos += 1;
             }
             KeyCode::Backspace => {
                 if self.open_cursor_pos > 0 {
-                    self.open_input.remove(self.open_cursor_pos - 1);
+                    let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos - 1);
+                    self.open_input.remove(byte_idx);
                     self.open_cursor_pos -= 1;
                 }
             }
             KeyCode::Delete => {
-                if self.open_cursor_pos < self.open_input.len() {
-                    self.open_input.remove(self.open_cursor_pos);
+                let char_count = self.open_input.chars().count();
+                if self.open_cursor_pos < char_count {
+                    let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos);
+                    self.open_input.remove(byte_idx);
                 }
             }
             KeyCode::Left => {
                 self.open_cursor_pos = self.open_cursor_pos.saturating_sub(1);
             }
             KeyCode::Right => {
-                self.open_cursor_pos = (self.open_cursor_pos + 1).min(self.open_input.len());
+                let char_count = self.open_input.chars().count();
+                self.open_cursor_pos = (self.open_cursor_pos + 1).min(char_count);
             }
             KeyCode::Home => {
                 self.open_cursor_pos = 0;
             }
             KeyCode::End => {
-                self.open_cursor_pos = self.open_input.len();
+                self.open_cursor_pos = self.open_input.chars().count();
             }
             _ => {}
         }
@@ -1145,9 +1175,9 @@ impl App {
                     self.do_save(&path);
                     self.running = false;
                 } else {
-                    // Need to open save dialog first
+                    // Open save dialog; quit automatically after save completes
+                    self.quit_after_save = true;
                     self.open_save_dialog();
-                    // After save completes, user will need to quit again
                 }
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -1156,10 +1186,20 @@ impl App {
             }
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
                 self.show_quit_confirm = false;
+                self.quit_after_save = false;
             }
             _ => {}
         }
     }
+}
+
+/// Convert a char-based cursor position to a byte index in a string.
+/// Panics if `char_pos` > number of chars (callers must clamp).
+fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
 }
 
 /// Convert days since Unix epoch to (year, month, day).

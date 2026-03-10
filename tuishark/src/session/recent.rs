@@ -45,8 +45,8 @@ impl RecentFiles {
         let canonical = std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf());
 
-        // Remove existing entry for same path
-        self.files.retain(|e| e.path != canonical);
+        // Remove existing entries matching either canonical or original path
+        self.files.retain(|e| e.path != canonical && e.path != path);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

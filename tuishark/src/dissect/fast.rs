@@ -2,7 +2,12 @@ use etherparse::{LinkSlice, NetSlice, SlicedPacket, TransportSlice};
 
 use super::model::{Layer, LayerField, PacketDetail, PacketSummary, Protocol};
 
+#[cfg(test)]
 pub fn parse_packet(index: usize, timestamp: f64, data: &[u8]) -> PacketSummary {
+    parse_packet_with_wire_len(index, timestamp, data, data.len())
+}
+
+pub fn parse_packet_with_wire_len(index: usize, timestamp: f64, data: &[u8], original_length: usize) -> PacketSummary {
     let mut source = String::new();
     let mut destination = String::new();
     let mut protocol = Protocol::Unknown("???".into());
@@ -81,6 +86,7 @@ pub fn parse_packet(index: usize, timestamp: f64, data: &[u8]) -> PacketSummary 
         destination,
         protocol,
         length: data.len(),
+        original_length,
         info,
     }
 }

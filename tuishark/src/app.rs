@@ -166,16 +166,15 @@ impl App {
 
         // Determine trace state and try to load eBPF engine
         let is_file_mode = file.is_some();
-        let (trace_engine, trace_state) = if is_file_mode {
-            (None, TraceState::FileMode)
+        let (trace_engine, trace_state, trace_msg) = if is_file_mode {
+            (None, TraceState::FileMode, None)
         } else if !enable_trace {
-            (None, TraceState::Disabled)
+            (None, TraceState::Disabled, None)
         } else {
             match TraceEngine::new() {
-                Ok(engine) => (Some(engine), TraceState::Active),
+                Ok(engine) => (Some(engine), TraceState::Active, None),
                 Err(e) => {
-                    eprintln!("Warning: eBPF tracing unavailable: {e}");
-                    (None, TraceState::Unavailable)
+                    (None, TraceState::Unavailable, Some(format!("eBPF tracing unavailable: {e}")))
                 }
             }
         };
@@ -202,7 +201,7 @@ impl App {
             available_interfaces: Vec::new(),
             picker_selected: 0,
             picker_scroll_offset: 0,
-            status_message: None,
+            status_message: trace_msg,
             dissect_worker,
             dissect_state: DissectState::Fast,
             dissect_seq: 0,
@@ -282,9 +281,12 @@ impl App {
         self.interface_name = Some(interface.to_string());
         self.auto_scroll = true;
         self.status_message = None;
-        // Restore trace state for live capture if engine is available
+        // Restore trace state for live capture
         if self.trace_engine.is_some() {
             self.trace_state = TraceState::Active;
+        } else if self.trace_state == TraceState::FileMode {
+            // Was in file mode — restore to Disabled or Unavailable
+            self.trace_state = TraceState::Disabled;
         }
         Ok(())
     }
@@ -1063,6 +1065,7 @@ impl App {
         self.clear_filter();
         self.trace_store.clear();
         self.trace_state = TraceState::FileMode;
+        // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
 
         // Restart deep dissection worker if needed
         if self.enable_deep && self.dissect_worker.is_none() {

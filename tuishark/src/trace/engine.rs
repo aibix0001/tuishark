@@ -8,6 +8,9 @@ use aya::{
 };
 
 /// Manages the eBPF programs and provides map lookup for process info.
+///
+/// Note: We cannot cache a `BpfHashMap` handle because it borrows from `Ebpf`.
+/// The `map_mut()` call is cheap after the first time since aya caches the fd internally.
 #[cfg(feature = "trace")]
 pub struct TraceEngine {
     bpf: Ebpf,
@@ -44,11 +47,19 @@ impl TraceEngine {
                 .map_err(|e| format!("Failed to attach kprobe to '{fn_name}': {e}"))?;
         }
 
+        // Verify the map exists at load time
+        if bpf.map_mut("FLOW_MAP").is_none() {
+            return Err("FLOW_MAP not found in eBPF program".into());
+        }
+
         Ok(Self { bpf })
     }
 
     /// Look up process info for a flow in the BPF map.
     /// Tries the forward key first, then the reverse (for received packets).
+    ///
+    /// Uses map_mut() which requires &mut self — aya needs mutable access
+    /// even for read-only map operations.
     pub fn lookup(&mut self, key: &FlowKey) -> Option<ProcessInfo> {
         let map = self.bpf.map_mut("FLOW_MAP")?;
         let hash_map: BpfHashMap<_, FlowKey, ProcessInfo> = map.try_into().ok()?;
@@ -58,7 +69,8 @@ impl TraceEngine {
             return Some(info);
         }
 
-        // Try reverse (the packet may have been captured on the receive path)
+        // Try reverse (the packet may have been captured on the receive path,
+        // so src/dst are swapped relative to the kprobe's perspective)
         let rev = key.reverse();
         hash_map.get(&rev, 0).ok()
     }

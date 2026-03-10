@@ -77,7 +77,7 @@ impl Widget for TraceView<'_> {
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
-                                format!("{}", info.pid),
+                                info.pid.to_string(),
                                 Style::default().fg(self.theme.green),
                             ),
                         ]),
@@ -103,7 +103,7 @@ impl Widget for TraceView<'_> {
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
-                                format!("{}", info.uid),
+                                info.uid.to_string(),
                                 Style::default().fg(self.theme.text),
                             ),
                         ]),

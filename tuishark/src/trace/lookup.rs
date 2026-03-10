@@ -3,12 +3,20 @@ use crate::dissect::model::{PacketSummary, Protocol};
 use super::model::FlowKey;
 
 /// Extract a FlowKey from a PacketSummary for BPF map lookup.
-/// Returns None for non-IP packets (ARP, etc.) or packets without ports.
+/// Returns None for non-IP packets (ARP, ICMP, etc.) — only TCP/UDP are traced by eBPF.
 pub fn flow_key_from_summary(summary: &PacketSummary) -> Option<FlowKey> {
     let protocol = match summary.protocol {
         Protocol::Tcp | Protocol::Http | Protocol::Tls => 6,  // IPPROTO_TCP
-        Protocol::Udp | Protocol::Dns => 17,                  // IPPROTO_UDP
-        _ => return None,
+        Protocol::Udp => 17,                                  // IPPROTO_UDP
+        // DNS can be either TCP or UDP — infer from the underlying transport port
+        Protocol::Dns => {
+            // DNS over TCP uses port 53 on TCP; if we have port info, check the
+            // original protocol from the packet. Since etherparse classifies by port,
+            // DNS packets always come from TCP or UDP — try both directions in lookup.
+            // Default to UDP (most common) since we can't distinguish here.
+            17
+        }
+        _ => return None,  // ICMP, ARP, etc. — not traced by eBPF kprobes
     };
 
     FlowKey::from_packet(

@@ -4,16 +4,9 @@ use super::model::ProcessInfo;
 
 /// Stores per-packet process information from eBPF tracing.
 /// Maps packet store index → ProcessInfo.
+#[derive(Default)]
 pub struct TraceStore {
     entries: HashMap<usize, ProcessInfo>,
-}
-
-impl Default for TraceStore {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
 }
 
 impl TraceStore {
@@ -27,6 +20,10 @@ impl TraceStore {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn clear(&mut self) {
@@ -56,6 +53,7 @@ mod tests {
         store.insert(1, make_info(5678, "wget"));
 
         assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
         assert_eq!(store.get(0).unwrap().pid, 1234);
         assert_eq!(store.get(1).unwrap().comm_str(), "wget");
         assert!(store.get(2).is_none());
@@ -68,6 +66,7 @@ mod tests {
         assert_eq!(store.len(), 1);
         store.clear();
         assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
         assert!(store.get(0).is_none());
     }
 }

@@ -89,17 +89,24 @@ pub enum TraceState {
     FileMode,
 }
 
-/// Parse an IPv4 address string into a u32 in network byte order.
+/// Parse an IPv4 address string into a u32 matching the kernel's `__be32` memory layout.
+///
+/// The kernel stores IP addresses as `__be32` (big-endian). When the eBPF program reads this
+/// via `bpf_probe_read_kernel` into a native `u32`, the raw memory bytes are interpreted in
+/// the platform's native byte order. We must produce the same representation here so that
+/// the BPF map lookup key matches.
 fn parse_ipv4(s: &str) -> Option<u32> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
+    let mut octets = s.splitn(5, '.');
+    let a: u8 = octets.next()?.parse().ok()?;
+    let b: u8 = octets.next()?.parse().ok()?;
+    let c: u8 = octets.next()?.parse().ok()?;
+    let d: u8 = octets.next()?.parse().ok()?;
+    // Reject if there are extra segments (e.g., "1.2.3.4.5")
+    if octets.next().is_some() {
         return None;
     }
-    let a: u8 = parts[0].parse().ok()?;
-    let b: u8 = parts[1].parse().ok()?;
-    let c: u8 = parts[2].parse().ok()?;
-    let d: u8 = parts[3].parse().ok()?;
-    Some(u32::from_be_bytes([a, b, c, d]))
+    // Use native byte order to match how eBPF reads __be32 from kernel memory
+    Some(u32::from_ne_bytes([a, b, c, d]))
 }
 
 #[cfg(test)]
@@ -108,10 +115,11 @@ mod tests {
 
     #[test]
     fn parse_ipv4_valid() {
-        assert_eq!(parse_ipv4("192.168.1.1"), Some(0xC0A80101));
-        assert_eq!(parse_ipv4("10.0.0.1"), Some(0x0A000001));
+        // Values use from_ne_bytes to match kernel __be32 read by eBPF
+        assert_eq!(parse_ipv4("192.168.1.1"), Some(u32::from_ne_bytes([192, 168, 1, 1])));
+        assert_eq!(parse_ipv4("10.0.0.1"), Some(u32::from_ne_bytes([10, 0, 0, 1])));
         assert_eq!(parse_ipv4("0.0.0.0"), Some(0));
-        assert_eq!(parse_ipv4("255.255.255.255"), Some(0xFFFFFFFF));
+        assert_eq!(parse_ipv4("255.255.255.255"), Some(u32::from_ne_bytes([255, 255, 255, 255])));
     }
 
     #[test]
@@ -133,8 +141,8 @@ mod tests {
         );
         assert!(key.is_some());
         let key = key.unwrap();
-        assert_eq!(key.src_addr, 0xC0A80101);
-        assert_eq!(key.dst_addr, 0x0A000001);
+        assert_eq!(key.src_addr, u32::from_ne_bytes([192, 168, 1, 1]));
+        assert_eq!(key.dst_addr, u32::from_ne_bytes([10, 0, 0, 1]));
         assert_eq!(key.src_port, 12345);
         assert_eq!(key.dst_port, 80);
         assert_eq!(key.protocol, 6);

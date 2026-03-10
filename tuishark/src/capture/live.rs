@@ -45,10 +45,20 @@ impl LiveCapture {
     /// Start capturing on the given interface in a background thread.
     /// The `packet_offset` sets the starting index for packet numbering.
     pub fn start(interface: &str, packet_offset: usize) -> Result<Self> {
+        Self::start_with_options(interface, packet_offset, true, 65535)
+    }
+
+    /// Start capturing with explicit promiscuous mode and snap length settings.
+    pub fn start_with_options(
+        interface: &str,
+        packet_offset: usize,
+        promiscuous: bool,
+        snap_length: u32,
+    ) -> Result<Self> {
         let cap = pcap::Capture::from_device(interface)
             .with_context(|| format!("cannot open interface '{interface}' (need root or CAP_NET_RAW?)"))?
-            .promisc(true)
-            .snaplen(65535)
+            .promisc(promiscuous)
+            .snaplen(snap_length as i32)
             .timeout(100) // 100ms poll timeout so we can check stop flag
             .open()
             .with_context(|| format!("failed to start capture on '{interface}'"))?;

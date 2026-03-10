@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use crate::capture::file::load_pcap;
 use crate::capture::live::{list_interfaces, InterfaceInfo, LiveCapture};
 use crate::capture::save::save_pcap;
+use crate::config::Config;
+use crate::config::keys::{Action, KeyBindings};
 use crate::dissect::deep::next_request_seq;
 use crate::dissect::fast::dissect_detail;
 use crate::dissect::model::{PacketDetail, PacketSummary};
@@ -16,6 +18,7 @@ use crate::store::packet_store::PacketStore;
 use crate::tui::Tui;
 use crate::ui::dialogs::interface_picker::InterfacePicker;
 use crate::ui::dialogs::open_dialog::{OpenDialog, OpenDialogMode};
+use crate::ui::dialogs::preset_picker::PresetPicker;
 use crate::ui::dialogs::quit_confirm::QuitConfirm;
 use crate::ui::dialogs::save_dialog::SaveDialog;
 use crate::ui::dialogs::export_dialog::ExportDialog;
@@ -159,6 +162,13 @@ pub struct App {
     export_filename: String,
     export_cursor_pos: usize,
     export_all_packets: bool,
+    // Configuration (Phase 9)
+    config: Config,
+    key_bindings: KeyBindings,
+    // Filter preset picker (Phase 9)
+    show_preset_picker: bool,
+    preset_selected: usize,
+    preset_scroll_offset: usize,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -189,6 +199,7 @@ impl App {
         interface: Option<String>,
         enable_deep: bool,
         enable_trace: bool,
+        config: Config,
     ) -> Self {
         let dissect_worker = if enable_deep {
             match DissectWorker::try_spawn() {
@@ -217,6 +228,16 @@ impl App {
             }
         };
 
+        let key_bindings = KeyBindings::from_config(&config.keys);
+        let theme = Theme::from_flavor(config.theme.flavor);
+        let auto_scroll = config.display.auto_scroll;
+
+        // Apply default interface from config if no CLI interface specified
+        let interface = interface.or_else(|| {
+            let iface = &config.capture.default_interface;
+            if iface.is_empty() { None } else { Some(iface.clone()) }
+        });
+
         Self {
             running: true,
             store: PacketStore::default(),
@@ -224,7 +245,7 @@ impl App {
             scroll_offset: 0,
             visible_rows: 20,
             active_pane: Pane::PacketTable,
-            theme: Theme::mocha(),
+            theme,
             detail: None,
             expanded_layers: Vec::new(),
             selected_layer: None,
@@ -234,7 +255,7 @@ impl App {
             interface_name: interface,
             capture_state: CaptureState::Idle,
             live_capture: None,
-            auto_scroll: true,
+            auto_scroll,
             show_interface_picker: false,
             available_interfaces: Vec::new(),
             picker_selected: 0,
@@ -277,6 +298,13 @@ impl App {
             export_filename: String::new(),
             export_cursor_pos: 0,
             export_all_packets: false,
+            // Configuration
+            config,
+            key_bindings,
+            // Filter preset picker
+            show_preset_picker: false,
+            preset_selected: 0,
+            preset_scroll_offset: 0,
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -342,11 +370,16 @@ impl App {
 
     fn start_capture(&mut self, interface: &str) -> Result<()> {
         let offset = self.store.len();
-        let capture = LiveCapture::start(interface, offset)?;
+        let capture = LiveCapture::start_with_options(
+            interface,
+            offset,
+            self.config.capture.promiscuous,
+            self.config.capture.snap_length,
+        )?;
         self.live_capture = Some(capture);
         self.capture_state = CaptureState::Capturing;
         self.interface_name = Some(interface.to_string());
-        self.auto_scroll = true;
+        self.auto_scroll = self.config.display.auto_scroll;
         self.status_message = None;
         // Restore trace state for live capture
         if self.trace_engine.is_some() {
@@ -572,7 +605,7 @@ impl App {
             Span::styled(source_info, Style::default().fg(self.theme.subtext0)),
             capture_indicator,
             Span::styled(
-                " Catppuccin Mocha ",
+                format!(" Catppuccin {} ", self.theme.flavor_name()),
                 Style::default().fg(self.theme.mauve),
             ),
         ]);
@@ -605,6 +638,9 @@ impl App {
             self.selected_packet,
             &self.theme,
             self.active_pane == Pane::PacketTable,
+            &self.config.columns,
+            self.config.display.timestamp_format,
+            self.store.first_absolute_ts(),
         );
         frame.render_widget(table, layout.packet_table);
 
@@ -628,6 +664,7 @@ impl App {
             self.highlight_range,
             &self.theme,
             self.active_pane == Pane::HexView,
+            self.config.display.hex_uppercase,
         );
         frame.render_widget(hex_view, layout.bottom_left);
 
@@ -656,7 +693,7 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Dialog overlays (priority order: quit > stats > save > open > picker)
+        // Dialog overlays (priority order: quit > stats > export > save > open > preset > picker)
         if self.show_quit_confirm {
             let dialog = QuitConfirm::new(&self.theme);
             frame.render_widget(dialog, frame.area());
@@ -716,6 +753,14 @@ impl App {
                 &self.theme,
             );
             frame.render_widget(dialog, frame.area());
+        } else if self.show_preset_picker {
+            let picker = PresetPicker::new(
+                &self.config.filters,
+                self.preset_selected,
+                self.preset_scroll_offset,
+                &self.theme,
+            );
+            frame.render_widget(picker, frame.area());
         } else if self.show_interface_picker {
             let picker = InterfacePicker::new(
                 &self.available_interfaces,
@@ -752,6 +797,10 @@ impl App {
             self.handle_open_dialog_key(key);
             return;
         }
+        if self.show_preset_picker {
+            self.handle_preset_picker_key(key);
+            return;
+        }
         if self.show_interface_picker {
             self.handle_picker_key(key);
             return;
@@ -761,85 +810,98 @@ impl App {
             return;
         }
 
-        // Global shortcuts
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                // Ctrl+C always force-quits immediately
-                self.running = false;
-                return;
-            }
-            (_, KeyCode::Char('q')) => {
-                self.try_quit();
-                return;
-            }
-            (_, KeyCode::Tab) => {
-                self.active_pane = self.active_pane.next();
-                return;
-            }
-            (KeyModifiers::SHIFT, KeyCode::BackTab) => {
-                self.active_pane = self.active_pane.prev();
-                return;
-            }
-            (_, KeyCode::Char('1')) => {
-                self.active_pane = Pane::PacketTable;
-                return;
-            }
-            (_, KeyCode::Char('2')) => {
-                self.active_pane = Pane::DetailTree;
-                return;
-            }
-            (_, KeyCode::Char('3')) => {
-                self.active_pane = Pane::HexView;
-                return;
-            }
-            (_, KeyCode::Char('4')) => {
-                self.active_pane = Pane::KernelTrace;
-                return;
-            }
-            // Session management shortcuts
-            (_, KeyCode::Char('s')) => {
-                self.open_save_dialog();
-                return;
-            }
-            (_, KeyCode::Char('w')) => {
-                self.quick_save();
-                return;
-            }
-            (_, KeyCode::Char('o')) => {
-                self.open_open_dialog();
-                return;
-            }
-            // Live capture controls
-            (_, KeyCode::Char('c')) if self.capture_state != CaptureState::Capturing => {
-                if self.file_path.is_none() {
-                    self.open_interface_picker();
+        // Global shortcuts via configurable key bindings
+        if let Some(action) = self.key_bindings.action_for(&key) {
+            match action {
+                Action::ForceQuit => {
+                    self.running = false;
+                    return;
                 }
-                return;
+                Action::Quit => {
+                    self.try_quit();
+                    return;
+                }
+                Action::NextPane => {
+                    self.active_pane = self.active_pane.next();
+                    return;
+                }
+                Action::PrevPane => {
+                    self.active_pane = self.active_pane.prev();
+                    return;
+                }
+                Action::FocusPacketTable => {
+                    self.active_pane = Pane::PacketTable;
+                    return;
+                }
+                Action::FocusDetailTree => {
+                    self.active_pane = Pane::DetailTree;
+                    return;
+                }
+                Action::FocusHexView => {
+                    self.active_pane = Pane::HexView;
+                    return;
+                }
+                Action::FocusKernelTrace => {
+                    self.active_pane = Pane::KernelTrace;
+                    return;
+                }
+                Action::Save => {
+                    self.open_save_dialog();
+                    return;
+                }
+                Action::QuickSave => {
+                    self.quick_save();
+                    return;
+                }
+                Action::Open => {
+                    self.open_open_dialog();
+                    return;
+                }
+                Action::InterfacePicker if self.capture_state != CaptureState::Capturing => {
+                    if self.file_path.is_none() {
+                        self.open_interface_picker();
+                    }
+                    return;
+                }
+                Action::StopCapture if self.capture_state == CaptureState::Capturing => {
+                    self.stop_capture();
+                    return;
+                }
+                Action::ToggleAutoScroll if self.capture_state == CaptureState::Capturing => {
+                    self.auto_scroll = !self.auto_scroll;
+                    return;
+                }
+                Action::Filter => {
+                    self.start_filter_edit();
+                    return;
+                }
+                Action::Export => {
+                    self.open_export_dialog();
+                    return;
+                }
+                Action::Stats => {
+                    self.open_stats_dialog();
+                    return;
+                }
+                Action::FilterPresets => {
+                    self.open_preset_picker();
+                    return;
+                }
+                // Navigation actions — dispatch to active pane
+                Action::MoveDown | Action::MoveUp | Action::MoveFirst | Action::MoveLast
+                | Action::PageDown | Action::PageUp | Action::ToggleExpand => {
+                    match self.active_pane {
+                        Pane::PacketTable => self.handle_packet_table_action(action),
+                        Pane::DetailTree => self.handle_detail_tree_action(action),
+                        Pane::HexView | Pane::KernelTrace => {}
+                    }
+                    return;
+                }
+                _ => {}
             }
-            (_, KeyCode::Esc) if self.capture_state == CaptureState::Capturing => {
-                self.stop_capture();
-                return;
-            }
-            (_, KeyCode::Char('f')) if self.capture_state == CaptureState::Capturing => {
-                self.auto_scroll = !self.auto_scroll;
-                return;
-            }
-            (_, KeyCode::Char('/')) => {
-                self.start_filter_edit();
-                return;
-            }
-            (_, KeyCode::Char('e')) => {
-                self.open_export_dialog();
-                return;
-            }
-            (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
-                self.open_stats_dialog();
-                return;
-            }
-            _ => {}
         }
 
-        // Pane-specific handling
+        // Pane-specific handling for hardcoded keys (arrow keys etc. handled by bindings above)
         match self.active_pane {
             Pane::PacketTable => self.handle_packet_table_key(key),
             Pane::DetailTree => self.handle_detail_tree_key(key),
@@ -903,7 +965,43 @@ impl App {
         }
     }
 
+    fn handle_packet_table_action(&mut self, action: Action) {
+        let display_len = self.filtered_len();
+        if display_len == 0 {
+            return;
+        }
+
+        // Manual navigation disables auto-scroll during live capture
+        if self.capture_state == CaptureState::Capturing {
+            self.auto_scroll = false;
+        }
+
+        let current_display_pos = self.selected_display_pos();
+
+        let new_display_pos = match action {
+            Action::MoveDown => {
+                current_display_pos.map(|p| (p + 1).min(display_len - 1)).unwrap_or(0)
+            }
+            Action::MoveUp => {
+                current_display_pos.map(|p| p.saturating_sub(1)).unwrap_or(0)
+            }
+            Action::MoveFirst => 0,
+            Action::MoveLast => display_len - 1,
+            Action::PageDown => {
+                current_display_pos.map(|p| (p + 20).min(display_len - 1)).unwrap_or(0)
+            }
+            Action::PageUp => {
+                current_display_pos.map(|p| p.saturating_sub(20)).unwrap_or(0)
+            }
+            _ => return,
+        };
+
+        let store_index = self.display_to_store_index(new_display_pos);
+        self.select_packet(store_index);
+    }
+
     fn handle_packet_table_key(&mut self, key: KeyEvent) {
+        // Legacy hardcoded key fallback (for keys not captured by action bindings)
         let display_len = self.filtered_len();
         if display_len == 0 {
             return;
@@ -950,6 +1048,86 @@ impl App {
 
         let store_index = self.display_to_store_index(new_display_pos);
         self.select_packet(store_index);
+    }
+
+    fn handle_detail_tree_action(&mut self, action: Action) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let layer_count = detail.layers.len();
+        if layer_count == 0 {
+            return;
+        }
+
+        match action {
+            Action::MoveDown => {
+                if let Some(field_idx) = self.selected_field {
+                    let layer_idx = self.selected_layer.unwrap_or(0);
+                    let field_count = detail.layers.get(layer_idx).map(|l| l.fields.len()).unwrap_or(0);
+                    if field_idx + 1 < field_count {
+                        self.selected_field = Some(field_idx + 1);
+                    } else {
+                        self.selected_field = None;
+                        self.selected_layer = Some(
+                            self.selected_layer
+                                .map(|i| (i + 1).min(layer_count - 1))
+                                .unwrap_or(0),
+                        );
+                    }
+                } else {
+                    let layer_idx = self.selected_layer.unwrap_or(0);
+                    let is_expanded = self.expanded_layers.get(layer_idx).copied().unwrap_or(false);
+                    let has_fields = detail.layers.get(layer_idx).map(|l| !l.fields.is_empty()).unwrap_or(false);
+                    if is_expanded && has_fields {
+                        self.selected_field = Some(0);
+                    } else {
+                        self.selected_layer = Some(
+                            self.selected_layer
+                                .map(|i| (i + 1).min(layer_count - 1))
+                                .unwrap_or(0),
+                        );
+                    }
+                }
+                self.update_highlight();
+            }
+            Action::MoveUp => {
+                if let Some(field_idx) = self.selected_field {
+                    if field_idx > 0 {
+                        self.selected_field = Some(field_idx - 1);
+                    } else {
+                        self.selected_field = None;
+                    }
+                } else {
+                    let prev_layer = self.selected_layer.map(|i| i.saturating_sub(1)).unwrap_or(0);
+                    if prev_layer != self.selected_layer.unwrap_or(0) {
+                        let is_expanded = self.expanded_layers.get(prev_layer).copied().unwrap_or(false);
+                        let field_count = detail.layers.get(prev_layer).map(|l| l.fields.len()).unwrap_or(0);
+                        if is_expanded && field_count > 0 {
+                            self.selected_layer = Some(prev_layer);
+                            self.selected_field = Some(field_count - 1);
+                        } else {
+                            self.selected_layer = Some(prev_layer);
+                            self.selected_field = None;
+                        }
+                    }
+                }
+                self.update_highlight();
+            }
+            Action::ToggleExpand => {
+                if self.selected_field.is_none() {
+                    if let Some(idx) = self.selected_layer {
+                        if idx < self.expanded_layers.len() {
+                            self.expanded_layers[idx] = !self.expanded_layers[idx];
+                            if !self.expanded_layers[idx] {
+                                self.selected_field = None;
+                            }
+                        }
+                    }
+                }
+                self.update_highlight();
+            }
+            _ => {}
+        }
     }
 
     fn handle_detail_tree_key(&mut self, key: KeyEvent) {
@@ -1581,7 +1759,14 @@ impl App {
             return;
         }
         self.export_step = ExportStep::FormatSelect;
-        self.export_format_selected = 0;
+        // Use config default format
+        use crate::config::ExportFormatDefault;
+        let default_idx = match self.config.export.default_format {
+            ExportFormatDefault::Csv => 0,
+            ExportFormatDefault::Json => 1,
+            ExportFormatDefault::Text => 2,
+        };
+        self.export_format_selected = default_idx;
         self.export_all_packets = self.filtered_indices.is_none();
         self.show_export_dialog = true;
     }
@@ -1599,7 +1784,13 @@ impl App {
         let seconds = secs % 60;
         let days = secs / 86400;
         let (year, month, day) = epoch_days_to_date(days);
-        format!("capture_{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}.{ext}")
+        let filename = format!("capture_{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}.{ext}");
+        let dir = &self.config.export.default_directory;
+        if dir.is_empty() || dir == "." {
+            filename
+        } else {
+            format!("{}/{}", dir.trim_end_matches('/'), filename)
+        }
     }
 
     fn handle_export_dialog_key(&mut self, key: KeyEvent) {
@@ -1987,6 +2178,65 @@ impl App {
         }
     }
 
+    // --- Filter preset picker methods (Phase 9) ---
+
+    fn open_preset_picker(&mut self) {
+        if self.config.filters.is_empty() {
+            self.status_message = Some("No filter presets configured in config.toml".into());
+            return;
+        }
+        self.preset_selected = 0;
+        self.preset_scroll_offset = 0;
+        self.show_preset_picker = true;
+    }
+
+    fn handle_preset_picker_key(&mut self, key: KeyEvent) {
+        let count = self.config.filters.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if count > 0 {
+                    self.preset_selected = (self.preset_selected + 1).min(count - 1);
+                    self.adjust_preset_scroll();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.preset_selected = self.preset_selected.saturating_sub(1);
+                self.adjust_preset_scroll();
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.preset_selected = 0;
+                self.preset_scroll_offset = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if count > 0 {
+                    self.preset_selected = count - 1;
+                    self.adjust_preset_scroll();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(preset) = self.config.filters.get(self.preset_selected) {
+                    let expr = preset.expression.clone();
+                    self.show_preset_picker = false;
+                    self.apply_filter(&expr);
+                    self.filter_input = expr;
+                }
+            }
+            KeyCode::Esc => {
+                self.show_preset_picker = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_preset_scroll(&mut self) {
+        let visible = 12usize; // matches max_items in preset_picker.rs
+        if self.preset_selected < self.preset_scroll_offset {
+            self.preset_scroll_offset = self.preset_selected;
+        } else if self.preset_selected >= self.preset_scroll_offset + visible {
+            self.preset_scroll_offset = self.preset_selected.saturating_sub(visible - 1);
+        }
+    }
+
     /// Get the visible packets for the current scroll offset and view.
     fn get_visible_packets(&self) -> Vec<PacketSummary> {
         match &self.filtered_indices {
@@ -2041,14 +2291,14 @@ mod tests {
 
     #[test]
     fn capture_state_default() {
-        let app = App::new(None, None, false, false);
+        let app = App::new(None, None, false, false, Config::default());
         assert_eq!(app.capture_state, CaptureState::Idle);
         assert!(app.auto_scroll);
     }
 
     #[test]
     fn picker_scroll_adjusts() {
-        let mut app = App::new(None, None, false, false);
+        let mut app = App::new(None, None, false, false, Config::default());
         app.picker_selected = 25;
         app.adjust_picker_scroll();
         assert!(app.picker_scroll_offset > 0);
@@ -2065,7 +2315,7 @@ mod tests {
 
     #[test]
     fn try_quit_with_empty_store() {
-        let mut app = App::new(None, None, false, false);
+        let mut app = App::new(None, None, false, false, Config::default());
         app.try_quit();
         assert!(!app.running); // Should quit immediately
     }

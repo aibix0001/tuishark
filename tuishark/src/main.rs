@@ -73,8 +73,10 @@ fn main() -> Result<()> {
         false
     };
 
+    let config = config::Config::load();
+
     let mut terminal = tui::init()?;
-    let result = app::App::new(cli.file, cli.interface, enable_deep, cli.trace).run(&mut terminal);
+    let result = app::App::new(cli.file, cli.interface, enable_deep, cli.trace, config).run(&mut terminal);
     tui::restore()?;
 
     result

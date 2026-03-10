@@ -38,6 +38,7 @@ pub struct LiveCapture {
     stop_flag: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     error: Arc<std::sync::Mutex<Option<String>>>,
+    first_absolute_ts: Arc<std::sync::Mutex<Option<f64>>>,
 }
 
 impl LiveCapture {
@@ -64,12 +65,15 @@ impl LiveCapture {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let error: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
+        let first_absolute_ts: Arc<std::sync::Mutex<Option<f64>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = mpsc::sync_channel::<(PacketSummary, Vec<u8>)>(CHANNEL_CAPACITY);
 
         let stop = stop_flag.clone();
         let err = error.clone();
+        let first_ts_clone = first_absolute_ts.clone();
         let handle = thread::spawn(move || {
-            capture_loop(cap, tx, stop, packet_offset, err);
+            capture_loop(cap, tx, stop, packet_offset, err, first_ts_clone);
         });
 
         Ok(Self {
@@ -77,6 +81,7 @@ impl LiveCapture {
             stop_flag,
             handle: Some(handle),
             error,
+            first_absolute_ts,
         })
     }
 
@@ -109,6 +114,11 @@ impl LiveCapture {
     pub fn error(&self) -> Option<String> {
         self.error.lock().ok()?.clone()
     }
+
+    /// Return the absolute timestamp of the first captured packet.
+    pub fn first_absolute_ts(&self) -> Option<f64> {
+        self.first_absolute_ts.lock().ok()?.as_ref().copied()
+    }
 }
 
 impl Drop for LiveCapture {
@@ -123,6 +133,7 @@ fn capture_loop(
     stop: Arc<AtomicBool>,
     packet_offset: usize,
     error: Arc<std::sync::Mutex<Option<String>>>,
+    first_absolute_ts: Arc<std::sync::Mutex<Option<f64>>>,
 ) {
     let mut index = packet_offset;
     let mut first_ts: Option<f64> = None;
@@ -136,6 +147,9 @@ fn capture_loop(
                     Some(first) => ts - first,
                     None => {
                         first_ts = Some(ts);
+                        if let Ok(mut guard) = first_absolute_ts.lock() {
+                            *guard = Some(ts);
+                        }
                         0.0
                     }
                 };

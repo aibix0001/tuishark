@@ -5,7 +5,9 @@ use std::path::Path;
 use crate::dissect::fast::parse_packet;
 use crate::dissect::model::PacketSummary;
 
-pub fn load_pcap(path: &Path) -> Result<Vec<(PacketSummary, Vec<u8>)>> {
+/// Load packets from a pcap/pcapng file.
+/// Returns (packets, absolute_first_timestamp).
+pub fn load_pcap(path: &Path) -> Result<(Vec<(PacketSummary, Vec<u8>)>, Option<f64>)> {
     let mut cap = Capture::from_file(path)?;
     let mut packets = Vec::new();
     let mut first_ts: Option<f64> = None;
@@ -37,5 +39,5 @@ pub fn load_pcap(path: &Path) -> Result<Vec<(PacketSummary, Vec<u8>)>> {
         }
     }
 
-    Ok(packets)
+    Ok((packets, first_ts))
 }

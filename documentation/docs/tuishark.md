@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14"]
 related_mrs: ["!2", "!4", "!7"]
 ---
 
@@ -56,6 +56,7 @@ cargo build --release
 | `o` | Open file / recent files dialog |
 | `c` | Open interface picker (when not capturing) |
 | `S` (Shift+S) | Open statistics dialog |
+| `e` | Open export dialog (CSV, JSON, Text) |
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
 | `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
@@ -192,8 +193,28 @@ Press `Shift+S` to open the statistics dialog, a near-full-screen modal overlay 
 
 Switch tabs with `Tab`/`Shift+Tab`. Toggle between all packets and filtered-only with `a`. Stats update live during active capture. Close with `Esc`.
 
+### Packet export (Phase 8)
+
+Press `e` to open the export dialog. A two-step flow lets you:
+
+1. **Select format**: use arrow keys to choose CSV, JSON, or Plain Text, then press Enter.
+2. **Enter filename**: a suggested name is pre-filled (e.g., `capture_20260310_142018.csv`). Edit as needed, press Enter to export.
+
+#### Supported formats
+
+| Format | Description | Extension |
+|--------|-------------|-----------|
+| CSV | RFC 4180 comma-separated values with header row | `.csv` |
+| JSON | Pretty-printed array of packet objects (via serde) | `.json` |
+| Plain Text | Fixed-width table with capture metadata header | `.txt` |
+
+#### Filter-aware export
+
+When a display filter is active, only matching packets are exported by default. Press `a` in the format selection step to toggle between "filtered only" and "all packets". The plain text format includes a note in the header when a filter was applied.
+
 ## Changelog
 
+- 2026-03-10: Phase 8 — packet export: CSV, JSON, and plain text formats with filter-aware dialog
 - 2026-03-10: Phase 7 — statistics & analytics: protocol hierarchy, conversations, endpoints, I/O graph
 - 2026-03-10: Phase 6 — eBPF kernel tracing: per-packet process identification
 - 2026-03-10: Phase 5 — display filter engine: expression parser, evaluator, filter bar UI

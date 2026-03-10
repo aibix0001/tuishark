@@ -6,6 +6,7 @@ mod event;
 mod export;
 mod filter;
 mod session;
+mod stats;
 mod store;
 mod trace;
 mod tui;

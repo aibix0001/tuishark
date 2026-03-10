@@ -65,11 +65,61 @@ impl PacketStore {
         self.modified_since_save = false;
     }
 
+    /// Iterate over packets, optionally filtered by indices.
+    /// When `indices` is `None`, iterates over all packets.
+    pub fn iter_packets<'a>(&'a self, indices: Option<&'a [usize]>) -> PacketIter<'a> {
+        PacketIter {
+            store: self,
+            indices,
+            pos: 0,
+        }
+    }
+
     pub fn clear(&mut self) {
         self.packets.clear();
         self.raw_data.clear();
         self.first_absolute_ts = None;
         self.modified_since_save = false;
+    }
+}
+
+pub struct PacketIter<'a> {
+    store: &'a PacketStore,
+    indices: Option<&'a [usize]>,
+    pos: usize,
+}
+
+impl<'a> Iterator for PacketIter<'a> {
+    type Item = &'a PacketSummary;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.indices {
+                Some(idx) => {
+                    let &i = idx.get(self.pos)?;
+                    self.pos += 1;
+                    if let Some(pkt) = self.store.get(i) {
+                        return Some(pkt);
+                    }
+                }
+                None => {
+                    if self.pos >= self.store.len() {
+                        return None;
+                    }
+                    let pkt = self.store.get(self.pos)?;
+                    self.pos += 1;
+                    return Some(pkt);
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = match self.indices {
+            Some(idx) => idx.len().saturating_sub(self.pos),
+            None => self.store.len().saturating_sub(self.pos),
+        };
+        (0, Some(remaining))
     }
 }
 

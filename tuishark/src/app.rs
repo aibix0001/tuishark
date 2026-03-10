@@ -28,10 +28,16 @@ use crate::ui::widgets::trace_view::TraceView;
 use crate::filter::ast::Expr;
 use crate::filter::eval;
 use crate::filter::parser;
+use crate::stats::conversations::{self, ConvSortColumn, ConversationStats};
+use crate::stats::endpoints::{self, EndpointSortColumn, EndpointStats};
+use crate::stats::io_graph::{self, IoGraphData};
+use crate::stats::model::StatsTab;
+use crate::stats::protocol::{self, ProtocolHierarchy};
 use crate::trace::engine::TraceEngine;
 use crate::trace::lookup::flow_key_from_summary;
 use crate::trace::model::TraceState;
 use crate::trace::store::TraceStore;
+use crate::ui::dialogs::stats_dialog::StatsDialog;
 
 use ratatui::{
     style::{Modifier, Style},
@@ -143,6 +149,28 @@ pub struct App {
     trace_engine: Option<TraceEngine>,
     trace_store: TraceStore,
     trace_state: TraceState,
+    // Statistics dialog (Phase 7)
+    show_stats_dialog: bool,
+    stats_tab: StatsTab,
+    stats_filter_aware: bool,
+    stats_proto_hierarchy: Option<ProtocolHierarchy>,
+    stats_proto_rows: Vec<(usize, usize, String, usize, u64, f64, f64)>,
+    stats_proto_expanded: Vec<bool>,
+    stats_proto_selected: usize,
+    stats_conversations: Vec<ConversationStats>,
+    stats_conv_selected: usize,
+    stats_conv_scroll: usize,
+    stats_conv_sort: ConvSortColumn,
+    stats_conv_ascending: bool,
+    stats_endpoints: Vec<EndpointStats>,
+    stats_ep_selected: usize,
+    stats_ep_scroll: usize,
+    stats_ep_sort: EndpointSortColumn,
+    stats_ep_ascending: bool,
+    stats_io_graph: Option<IoGraphData>,
+    stats_io_show_bytes: bool,
+    stats_io_num_buckets: usize,
+    stats_content_height: usize,
 }
 
 impl App {
@@ -232,6 +260,28 @@ impl App {
             trace_engine,
             trace_store: TraceStore::default(),
             trace_state,
+            // Statistics dialog
+            show_stats_dialog: false,
+            stats_tab: StatsTab::ProtocolHierarchy,
+            stats_filter_aware: false,
+            stats_proto_hierarchy: None,
+            stats_proto_rows: Vec::new(),
+            stats_proto_expanded: Vec::new(),
+            stats_proto_selected: 0,
+            stats_conversations: Vec::new(),
+            stats_conv_selected: 0,
+            stats_conv_scroll: 0,
+            stats_conv_sort: ConvSortColumn::TotalPackets,
+            stats_conv_ascending: false,
+            stats_endpoints: Vec::new(),
+            stats_ep_selected: 0,
+            stats_ep_scroll: 0,
+            stats_ep_sort: EndpointSortColumn::TotalPackets,
+            stats_ep_ascending: false,
+            stats_io_graph: None,
+            stats_io_show_bytes: false,
+            stats_io_num_buckets: 50,
+            stats_content_height: 20,
         }
     }
 
@@ -338,6 +388,11 @@ impl App {
                 }
                 None => break,
             }
+        }
+
+        // Recompute stats if dialog is open and new packets arrived
+        if new_packets && self.show_stats_dialog {
+            self.compute_current_stats();
         }
 
         // Auto-scroll: select the last packet if following tail
@@ -584,9 +639,34 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Dialog overlays (priority order: quit > save > open > picker)
+        // Dialog overlays (priority order: quit > stats > save > open > picker)
         if self.show_quit_confirm {
             let dialog = QuitConfirm::new(&self.theme);
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_stats_dialog {
+            // Track dialog content height for scroll calculations
+            let dialog_h = (frame.area().height as u32 * 80 / 100) as u16;
+            // dialog chrome: 2 border + 1 tab bar + 1 help line + 1 header = 5
+            self.stats_content_height = dialog_h.saturating_sub(7) as usize;
+            let dialog = StatsDialog::new(
+                self.stats_tab,
+                &self.stats_proto_rows,
+                self.stats_proto_selected,
+                &self.stats_conversations,
+                self.stats_conv_selected,
+                self.stats_conv_scroll,
+                self.stats_conv_sort,
+                self.stats_conv_ascending,
+                &self.stats_endpoints,
+                self.stats_ep_selected,
+                self.stats_ep_scroll,
+                self.stats_ep_sort,
+                self.stats_ep_ascending,
+                self.stats_io_graph.as_ref(),
+                self.stats_io_show_bytes,
+                self.stats_filter_aware,
+                &self.theme,
+            );
             frame.render_widget(dialog, frame.area());
         } else if self.show_save_dialog {
             let dialog = SaveDialog::new(
@@ -624,6 +704,10 @@ impl App {
         // Dialog mode routing (highest priority first)
         if self.show_quit_confirm {
             self.handle_quit_confirm_key(key);
+            return;
+        }
+        if self.show_stats_dialog {
+            self.handle_stats_key(key);
             return;
         }
         if self.show_save_dialog {
@@ -708,6 +792,10 @@ impl App {
             }
             (_, KeyCode::Char('/')) => {
                 self.start_filter_edit();
+                return;
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+                self.open_stats_dialog();
                 return;
             }
             _ => {}
@@ -1444,6 +1532,256 @@ impl App {
         match &self.filtered_indices {
             Some(indices) => indices.binary_search(&selected).ok(),
             None => Some(selected),
+        }
+    }
+
+    // --- Statistics dialog methods (Phase 7) ---
+
+    fn open_stats_dialog(&mut self) {
+        self.show_stats_dialog = true;
+        self.stats_proto_selected = 0;
+        self.stats_conv_selected = 0;
+        self.stats_conv_scroll = 0;
+        self.stats_ep_selected = 0;
+        self.stats_ep_scroll = 0;
+        self.compute_current_stats();
+    }
+
+    fn close_stats_dialog(&mut self) {
+        self.show_stats_dialog = false;
+        // Free cached data
+        self.stats_proto_hierarchy = None;
+        self.stats_proto_rows.clear();
+        self.stats_proto_expanded.clear();
+        self.stats_conversations.clear();
+        self.stats_endpoints.clear();
+        self.stats_io_graph = None;
+    }
+
+    fn compute_current_stats(&mut self) {
+        let indices = if self.stats_filter_aware {
+            self.filtered_indices.as_deref()
+        } else {
+            None
+        };
+
+        match self.stats_tab {
+            StatsTab::ProtocolHierarchy => {
+                let hierarchy = protocol::compute(&self.store, indices);
+                let node_count = protocol::count_nodes(&hierarchy);
+                if self.stats_proto_expanded.len() != node_count {
+                    self.stats_proto_expanded = vec![true; node_count];
+                }
+                self.stats_proto_rows = protocol::flatten(&hierarchy, &self.stats_proto_expanded);
+                self.stats_proto_hierarchy = Some(hierarchy);
+            }
+            StatsTab::Conversations => {
+                self.stats_conversations = conversations::compute(&self.store, indices);
+                conversations::sort_conversations(
+                    &mut self.stats_conversations,
+                    self.stats_conv_sort,
+                    self.stats_conv_ascending,
+                );
+            }
+            StatsTab::Endpoints => {
+                self.stats_endpoints = endpoints::compute(&self.store, indices);
+                endpoints::sort_endpoints(
+                    &mut self.stats_endpoints,
+                    self.stats_ep_sort,
+                    self.stats_ep_ascending,
+                );
+            }
+            StatsTab::IoGraph => {
+                self.stats_io_graph =
+                    Some(io_graph::compute(&self.store, indices, self.stats_io_num_buckets));
+            }
+        }
+    }
+
+    fn handle_stats_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_stats_dialog();
+            }
+            KeyCode::Tab => {
+                self.stats_tab = self.stats_tab.next();
+                self.compute_current_stats();
+            }
+            KeyCode::BackTab => {
+                self.stats_tab = self.stats_tab.prev();
+                self.compute_current_stats();
+            }
+            KeyCode::Char('a') => {
+                self.stats_filter_aware = !self.stats_filter_aware;
+                self.compute_current_stats();
+            }
+            _ => match self.stats_tab {
+                StatsTab::ProtocolHierarchy => self.handle_stats_proto_key(key),
+                StatsTab::Conversations => self.handle_stats_conv_key(key),
+                StatsTab::Endpoints => self.handle_stats_ep_key(key),
+                StatsTab::IoGraph => self.handle_stats_io_key(key),
+            },
+        }
+    }
+
+    fn handle_stats_proto_key(&mut self, key: KeyEvent) {
+        let row_count = self.stats_proto_rows.len();
+        if row_count == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.stats_proto_selected = (self.stats_proto_selected + 1).min(row_count - 1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.stats_proto_selected = self.stats_proto_selected.saturating_sub(1);
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.stats_proto_selected = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.stats_proto_selected = row_count - 1;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                // Toggle expand/collapse using the node_index stored in the row
+                if let Some(row) = self.stats_proto_rows.get(self.stats_proto_selected) {
+                    let node_index = row.0;
+                    if node_index < self.stats_proto_expanded.len() {
+                        self.stats_proto_expanded[node_index] =
+                            !self.stats_proto_expanded[node_index];
+                        // Rebuild rows after toggling
+                        if let Some(ref hierarchy) = self.stats_proto_hierarchy {
+                            self.stats_proto_rows =
+                                protocol::flatten(hierarchy, &self.stats_proto_expanded);
+                            // Clamp selection
+                            if self.stats_proto_selected >= self.stats_proto_rows.len() {
+                                self.stats_proto_selected =
+                                    self.stats_proto_rows.len().saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_stats_conv_key(&mut self, key: KeyEvent) {
+        let count = self.stats_conversations.len();
+        if count == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.stats_conv_selected = (self.stats_conv_selected + 1).min(count - 1);
+                self.adjust_stats_conv_scroll();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.stats_conv_selected = self.stats_conv_selected.saturating_sub(1);
+                self.adjust_stats_conv_scroll();
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.stats_conv_selected = 0;
+                self.stats_conv_scroll = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.stats_conv_selected = count - 1;
+                self.adjust_stats_conv_scroll();
+            }
+            KeyCode::Char('s') => {
+                self.stats_conv_sort = self.stats_conv_sort.next();
+                conversations::sort_conversations(
+                    &mut self.stats_conversations,
+                    self.stats_conv_sort,
+                    self.stats_conv_ascending,
+                );
+            }
+            KeyCode::Char('r') => {
+                self.stats_conv_ascending = !self.stats_conv_ascending;
+                conversations::sort_conversations(
+                    &mut self.stats_conversations,
+                    self.stats_conv_sort,
+                    self.stats_conv_ascending,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_stats_conv_scroll(&mut self) {
+        let visible = self.stats_content_height.max(1);
+        if self.stats_conv_selected < self.stats_conv_scroll {
+            self.stats_conv_scroll = self.stats_conv_selected;
+        } else if self.stats_conv_selected >= self.stats_conv_scroll + visible {
+            self.stats_conv_scroll = self.stats_conv_selected.saturating_sub(visible - 1);
+        }
+    }
+
+    fn handle_stats_ep_key(&mut self, key: KeyEvent) {
+        let count = self.stats_endpoints.len();
+        if count == 0 {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.stats_ep_selected = (self.stats_ep_selected + 1).min(count - 1);
+                self.adjust_stats_ep_scroll();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.stats_ep_selected = self.stats_ep_selected.saturating_sub(1);
+                self.adjust_stats_ep_scroll();
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.stats_ep_selected = 0;
+                self.stats_ep_scroll = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.stats_ep_selected = count - 1;
+                self.adjust_stats_ep_scroll();
+            }
+            KeyCode::Char('s') => {
+                self.stats_ep_sort = self.stats_ep_sort.next();
+                endpoints::sort_endpoints(
+                    &mut self.stats_endpoints,
+                    self.stats_ep_sort,
+                    self.stats_ep_ascending,
+                );
+            }
+            KeyCode::Char('r') => {
+                self.stats_ep_ascending = !self.stats_ep_ascending;
+                endpoints::sort_endpoints(
+                    &mut self.stats_endpoints,
+                    self.stats_ep_sort,
+                    self.stats_ep_ascending,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_stats_ep_scroll(&mut self) {
+        let visible = self.stats_content_height.max(1);
+        if self.stats_ep_selected < self.stats_ep_scroll {
+            self.stats_ep_scroll = self.stats_ep_selected;
+        } else if self.stats_ep_selected >= self.stats_ep_scroll + visible {
+            self.stats_ep_scroll = self.stats_ep_selected.saturating_sub(visible - 1);
+        }
+    }
+
+    fn handle_stats_io_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('b') => {
+                self.stats_io_show_bytes = !self.stats_io_show_bytes;
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.stats_io_num_buckets = (self.stats_io_num_buckets * 2).min(500);
+                self.compute_current_stats();
+            }
+            KeyCode::Char('-') => {
+                self.stats_io_num_buckets = (self.stats_io_num_buckets / 2).max(5);
+                self.compute_current_stats();
+            }
+            _ => {}
         }
     }
 

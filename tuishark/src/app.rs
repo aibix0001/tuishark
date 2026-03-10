@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use crate::capture::file::load_pcap;
@@ -17,6 +18,7 @@ use crate::ui::dialogs::interface_picker::InterfacePicker;
 use crate::ui::dialogs::open_dialog::{OpenDialog, OpenDialogMode};
 use crate::ui::dialogs::quit_confirm::QuitConfirm;
 use crate::ui::dialogs::save_dialog::SaveDialog;
+use crate::ui::dialogs::export_dialog::ExportDialog;
 use crate::ui::layout::AppLayout;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::detail_tree::DetailTree;
@@ -38,6 +40,7 @@ use crate::trace::lookup::flow_key_from_summary;
 use crate::trace::model::TraceState;
 use crate::trace::store::TraceStore;
 use crate::ui::dialogs::stats_dialog::StatsDialog;
+use crate::export::{ExportFormat, ExportStep};
 
 use ratatui::{
     style::{Modifier, Style},
@@ -149,6 +152,13 @@ pub struct App {
     trace_engine: Option<TraceEngine>,
     trace_store: TraceStore,
     trace_state: TraceState,
+    // Export dialog (Phase 8)
+    show_export_dialog: bool,
+    export_step: ExportStep,
+    export_format_selected: usize,
+    export_filename: String,
+    export_cursor_pos: usize,
+    export_all_packets: bool,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -260,6 +270,13 @@ impl App {
             trace_engine,
             trace_store: TraceStore::default(),
             trace_state,
+            // Export dialog
+            show_export_dialog: false,
+            export_step: ExportStep::FormatSelect,
+            export_format_selected: 0,
+            export_filename: String::new(),
+            export_cursor_pos: 0,
+            export_all_packets: false,
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -668,6 +685,19 @@ impl App {
                 &self.theme,
             );
             frame.render_widget(dialog, frame.area());
+        } else if self.show_export_dialog {
+            let filtered_count = self.filtered_indices.as_ref().map(|idx| idx.len());
+            let dialog = ExportDialog::new(
+                self.export_step,
+                self.export_format_selected,
+                &self.export_filename,
+                self.export_cursor_pos,
+                self.export_all_packets,
+                self.store.len(),
+                filtered_count,
+                &self.theme,
+            );
+            frame.render_widget(dialog, frame.area());
         } else if self.show_save_dialog {
             let dialog = SaveDialog::new(
                 &self.save_filename,
@@ -708,6 +738,10 @@ impl App {
         }
         if self.show_stats_dialog {
             self.handle_stats_key(key);
+            return;
+        }
+        if self.show_export_dialog {
+            self.handle_export_dialog_key(key);
             return;
         }
         if self.show_save_dialog {
@@ -792,6 +826,10 @@ impl App {
             }
             (_, KeyCode::Char('/')) => {
                 self.start_filter_edit();
+                return;
+            }
+            (_, KeyCode::Char('e')) => {
+                self.open_export_dialog();
                 return;
             }
             (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
@@ -1535,6 +1573,170 @@ impl App {
         }
     }
 
+    // --- Export dialog methods (Phase 8) ---
+
+    fn open_export_dialog(&mut self) {
+        if self.store.is_empty() {
+            self.status_message = Some("No packets to export".into());
+            return;
+        }
+        self.export_step = ExportStep::FormatSelect;
+        self.export_format_selected = 0;
+        self.export_all_packets = self.filtered_indices.is_none();
+        self.show_export_dialog = true;
+    }
+
+    fn export_default_filename(&self) -> String {
+        let format = ExportFormat::ALL[self.export_format_selected];
+        let ext = format.extension();
+        let now = std::time::SystemTime::now();
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let hours = (secs % 86400) / 3600;
+        let minutes = (secs % 3600) / 60;
+        let seconds = secs % 60;
+        let days = secs / 86400;
+        let (year, month, day) = epoch_days_to_date(days);
+        format!("capture_{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}.{ext}")
+    }
+
+    fn handle_export_dialog_key(&mut self, key: KeyEvent) {
+        match self.export_step {
+            ExportStep::FormatSelect => self.handle_export_format_key(key),
+            ExportStep::FilenameInput => self.handle_export_filename_key(key),
+        }
+    }
+
+    fn handle_export_format_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.export_format_selected =
+                    (self.export_format_selected + 1).min(ExportFormat::ALL.len() - 1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.export_format_selected = self.export_format_selected.saturating_sub(1);
+            }
+            KeyCode::Char('a') => {
+                if self.filtered_indices.is_some() {
+                    self.export_all_packets = !self.export_all_packets;
+                }
+            }
+            KeyCode::Enter => {
+                // Move to filename step
+                self.export_filename = self.export_default_filename();
+                self.export_cursor_pos = self.export_filename.chars().count();
+                self.export_step = ExportStep::FilenameInput;
+            }
+            KeyCode::Esc => {
+                self.show_export_dialog = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_export_filename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                let byte_idx = char_to_byte_index(&self.export_filename, self.export_cursor_pos);
+                self.export_filename.insert(byte_idx, c);
+                self.export_cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if self.export_cursor_pos > 0 {
+                    let byte_idx =
+                        char_to_byte_index(&self.export_filename, self.export_cursor_pos - 1);
+                    self.export_filename.remove(byte_idx);
+                    self.export_cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = self.export_filename.chars().count();
+                if self.export_cursor_pos < char_count {
+                    let byte_idx =
+                        char_to_byte_index(&self.export_filename, self.export_cursor_pos);
+                    self.export_filename.remove(byte_idx);
+                }
+            }
+            KeyCode::Left => {
+                self.export_cursor_pos = self.export_cursor_pos.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_count = self.export_filename.chars().count();
+                self.export_cursor_pos = (self.export_cursor_pos + 1).min(char_count);
+            }
+            KeyCode::Home => {
+                self.export_cursor_pos = 0;
+            }
+            KeyCode::End => {
+                self.export_cursor_pos = self.export_filename.chars().count();
+            }
+            KeyCode::Enter => {
+                let filename = self.export_filename.trim().to_string();
+                self.show_export_dialog = false;
+                if !filename.is_empty() {
+                    self.do_export(&filename);
+                }
+            }
+            KeyCode::Esc => {
+                // Go back to format selection
+                self.export_step = ExportStep::FormatSelect;
+            }
+            _ => {}
+        }
+    }
+
+    fn do_export(&mut self, filename: &str) {
+        let path = std::path::Path::new(filename);
+        let format = ExportFormat::ALL[self.export_format_selected];
+        let indices = if self.export_all_packets {
+            None
+        } else {
+            self.filtered_indices.as_deref()
+        };
+        let is_filtered = indices.is_some();
+        let first_ts = self.store.first_absolute_ts();
+
+        let result = std::fs::File::create(path).map_err(anyhow::Error::from).and_then(|file| {
+            let mut writer = std::io::BufWriter::new(file);
+            let count = match format {
+                ExportFormat::Csv => {
+                    crate::export::csv::export_csv(&mut writer, &self.store, indices, first_ts)
+                }
+                ExportFormat::Json => {
+                    crate::export::json::export_json(&mut writer, &self.store, indices, first_ts)
+                }
+                ExportFormat::Text => {
+                    let file_path = self.file_path.as_ref().map(|p| p.display().to_string());
+                    crate::export::text::export_text(
+                        &mut writer,
+                        &self.store,
+                        indices,
+                        file_path.as_deref(),
+                        is_filtered,
+                        first_ts,
+                    )
+                }
+            };
+            // Explicitly flush to catch write errors (BufWriter::drop silently ignores them)
+            writer.flush().map_err(anyhow::Error::from)?;
+            count
+        });
+
+        match result {
+            Ok(count) => {
+                self.status_message = Some(format!(
+                    "Exported {count} packets to {} ({format})",
+                    path.display()
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Export failed: {e:#}"));
+            }
+        }
+    }
+
     // --- Statistics dialog methods (Phase 7) ---
 
     fn open_stats_dialog(&mut self) {
@@ -1814,18 +2016,7 @@ fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
 
 /// Convert days since Unix epoch to (year, month, day).
 fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
-    // Civil days algorithm (simplified)
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
+    crate::export::epoch_days_to_date(days)
 }
 
 #[cfg(test)]

@@ -10,14 +10,21 @@ use crate::ui::theme::Theme;
 
 pub struct HexView<'a> {
     data: Option<&'a [u8]>,
+    highlight_range: Option<(usize, usize)>,
     theme: &'a Theme,
     focused: bool,
 }
 
 impl<'a> HexView<'a> {
-    pub fn new(data: Option<&'a [u8]>, theme: &'a Theme, focused: bool) -> Self {
+    pub fn new(
+        data: Option<&'a [u8]>,
+        highlight_range: Option<(usize, usize)>,
+        theme: &'a Theme,
+        focused: bool,
+    ) -> Self {
         Self {
             data,
+            highlight_range,
             theme,
             focused,
         }
@@ -47,6 +54,13 @@ impl Widget for HexView<'_> {
             return;
         };
 
+        let highlight = self.highlight_range;
+        let hl_style = Style::default()
+            .fg(self.theme.base)
+            .bg(self.theme.yellow);
+        let normal_hex_style = Style::default().fg(self.theme.text);
+        let normal_ascii_style = Style::default().fg(self.theme.green);
+
         let max_lines = area.height.saturating_sub(2) as usize;
         let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -55,38 +69,63 @@ impl Widget for HexView<'_> {
                 break;
             }
 
-            let offset_str = format!("{:04x}  ", i * 16);
+            let row_offset = i * 16;
+            let offset_str = format!("{:04x}  ", row_offset);
 
-            let hex_part: String = chunk
-                .iter()
-                .enumerate()
-                .map(|(j, b)| {
-                    if j == 8 {
-                        format!(" {:02x}", b)
-                    } else {
-                        format!("{:02x} ", b)
-                    }
-                })
-                .collect();
-            let hex_padded = format!("{:<49}", hex_part);
+            // Build hex spans with highlighting
+            let mut hex_spans: Vec<Span<'_>> = Vec::new();
+            for (j, b) in chunk.iter().enumerate() {
+                let byte_pos = row_offset + j;
+                let is_highlighted = highlight
+                    .map(|(s, e)| byte_pos >= s && byte_pos < e)
+                    .unwrap_or(false);
 
-            let ascii_part: String = chunk
-                .iter()
-                .map(|b| {
-                    if b.is_ascii_graphic() || *b == b' ' {
-                        *b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
+                let separator = if j == 8 { " " } else { "" };
+                if !separator.is_empty() {
+                    hex_spans.push(Span::styled(separator.to_string(), normal_hex_style));
+                }
 
-            lines.push(Line::from(vec![
+                let hex_str = format!("{:02x} ", b);
+                let style = if is_highlighted { hl_style } else { normal_hex_style };
+                hex_spans.push(Span::styled(hex_str, style));
+            }
+
+            // Pad remaining hex space
+            let remaining = 16 - chunk.len();
+            if remaining > 0 {
+                let pad_width = remaining * 3 + if chunk.len() <= 8 { 1 } else { 0 };
+                hex_spans.push(Span::styled(
+                    " ".repeat(pad_width),
+                    normal_hex_style,
+                ));
+            }
+
+            // Build ASCII spans with highlighting
+            let mut ascii_spans: Vec<Span<'_>> = Vec::new();
+            for (j, b) in chunk.iter().enumerate() {
+                let byte_pos = row_offset + j;
+                let is_highlighted = highlight
+                    .map(|(s, e)| byte_pos >= s && byte_pos < e)
+                    .unwrap_or(false);
+
+                let ch = if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                };
+
+                let style = if is_highlighted { hl_style } else { normal_ascii_style };
+                ascii_spans.push(Span::styled(ch.to_string(), style));
+            }
+
+            let mut spans = vec![
                 Span::styled(offset_str, Style::default().fg(self.theme.overlay0)),
-                Span::styled(hex_padded, Style::default().fg(self.theme.text)),
-                Span::styled(" ".to_string(), Style::default()),
-                Span::styled(ascii_part, Style::default().fg(self.theme.green)),
-            ]));
+            ];
+            spans.extend(hex_spans);
+            spans.push(Span::styled(" ", Style::default()));
+            spans.extend(ascii_spans);
+
+            lines.push(Line::from(spans));
         }
 
         let p = Paragraph::new(lines).block(block);

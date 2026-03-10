@@ -3,8 +3,8 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3"]
-related_mrs: ["!2"]
+related_issues: ["#1", "#2", "#3", "#4"]
+related_mrs: ["!2", "!4"]
 ---
 
 ## Overview
@@ -65,6 +65,7 @@ No configuration file yet — planned for Phase 9.
 
 - Rust toolchain (1.75+)
 - `libpcap-dev` system package
+- `tshark` (optional, for deep dissection — install via `apt install tshark`)
 
 ### Architecture
 
@@ -86,13 +87,29 @@ The application follows a 4-pane layout:
 
 ### Two-tier packet dissection
 
-- **Fast path** (`etherparse`): Zero-copy parsing for summary fields on every packet during capture
-- **Deep path** (`rtshark`, Phase 3): Full Wireshark-grade dissection via tshark subprocess, on-demand per selected packet
+- **Fast path** (`etherparse`): Zero-copy parsing for summary fields on every packet during capture. Provides immediate detail when selecting a packet.
+- **Deep path** (`rtshark`, Phase 3): Full Wireshark-grade dissection via tshark subprocess, on-demand per selected packet. Runs in a background worker thread and replaces the fast result with richer protocol layers (HTTP headers, DNS queries, TLS handshake details, etc.) when ready.
 
-### Supported protocols (Phase 1)
+The deep path uses a named FIFO to stream packets to a long-running tshark process, avoiding per-packet process startup overhead. If tshark is not installed, the application falls back to etherparse-only mode. Use `--no-deep` to explicitly disable deep dissection.
 
-Ethernet, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, ARP, plus port-based classification for DNS (53), HTTP (80/8080), and TLS (443).
+### Hex view byte highlighting
+
+When selecting a protocol layer or individual field in the detail tree, the corresponding bytes are highlighted in the hex dump view. This requires deep dissection (tshark) for full byte-range coverage across all protocol layers.
+
+### Supported protocols
+
+**Fast path (etherparse):** Ethernet, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, ARP, plus port-based classification for DNS (53), HTTP (80/8080), and TLS (443).
+
+**Deep path (tshark):** All 3000+ Wireshark protocol dissectors, including full application-layer decoding for HTTP, DNS, TLS, DHCP, SMTP, SSH, and more.
 
 ### Live capture (Phase 2)
 
 Live capture runs a background thread that sniffs packets via libpcap and streams them to the UI over an `mpsc` channel. The packet table auto-scrolls to follow new packets; manual navigation pauses auto-scroll, and `f` re-enables it. Capture state (Idle/Capturing/Stopped) is shown in both the header and status bar.
+
+### Deep dissection (Phase 3)
+
+Deep dissection runs a `DeepDissector` in a dedicated worker thread. When a packet is selected, the fast (etherparse) result is shown immediately while a deep dissection request is queued. The worker writes the raw packet to a named FIFO (with pcap headers), tshark reads and dissects it, and rtshark parses the PDML output into structured layers. The result is sent back via an `mpsc` channel and replaces the fast detail on the next UI tick. The status bar shows `DISSECTING...` while pending and `DEEP` when the deep result is displayed.
+
+## Changelog
+
+- 2026-03-10: Phase 3 — added deep dissection via tshark, hex byte highlighting, field-level selection

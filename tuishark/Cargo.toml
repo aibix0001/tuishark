@@ -16,3 +16,5 @@ pcap = "2"
 etherparse = "0.16"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+rtshark = "4"
+libc = "0.2"

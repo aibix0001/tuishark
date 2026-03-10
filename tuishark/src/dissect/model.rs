@@ -50,7 +50,6 @@ impl fmt::Display for Protocol {
 pub struct LayerField {
     pub name: String,
     pub value: String,
-    #[allow(dead_code)] // used in Phase 3 for hex view highlight
     pub byte_range: Option<(usize, usize)>,
 }
 

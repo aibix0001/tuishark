@@ -6,13 +6,14 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::CaptureState;
+use crate::app::{CaptureState, DissectState};
 use crate::ui::theme::Theme;
 
 pub struct StatusBar<'a> {
     packet_count: usize,
     selected: Option<usize>,
     capture_state: CaptureState,
+    dissect_state: DissectState,
     status_message: Option<&'a str>,
     theme: &'a Theme,
 }
@@ -22,6 +23,7 @@ impl<'a> StatusBar<'a> {
         packet_count: usize,
         selected: Option<usize>,
         capture_state: CaptureState,
+        dissect_state: DissectState,
         status_message: Option<&'a str>,
         theme: &'a Theme,
     ) -> Self {
@@ -29,6 +31,7 @@ impl<'a> StatusBar<'a> {
             packet_count,
             selected,
             capture_state,
+            dissect_state,
             status_message,
             theme,
         }
@@ -60,6 +63,24 @@ impl Widget for StatusBar<'_> {
             ),
         };
 
+        let dissect_span = match self.dissect_state {
+            DissectState::Fast => Span::styled("", Style::default()),
+            DissectState::DeepPending => Span::styled(
+                " DISSECTING... ",
+                Style::default()
+                    .fg(self.theme.base)
+                    .bg(self.theme.peach)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            DissectState::Deep => Span::styled(
+                " DEEP ",
+                Style::default()
+                    .fg(self.theme.base)
+                    .bg(self.theme.mauve)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        };
+
         let mut spans = vec![
             Span::styled(
                 format!(" Packets: {} ", self.packet_count),
@@ -77,6 +98,14 @@ impl Widget for StatusBar<'_> {
 
         if self.capture_state != CaptureState::Idle {
             spans.push(capture_span);
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(self.theme.surface0),
+            ));
+        }
+
+        if self.dissect_state != DissectState::Fast {
+            spans.push(dissect_span);
             spans.push(Span::styled(
                 " ",
                 Style::default().bg(self.theme.surface0),

@@ -4,6 +4,7 @@ use ratatui::{
 
 pub struct AppLayout {
     pub header: Rect,
+    pub filter_bar: Rect,
     pub packet_table: Rect,
     pub detail_tree: Rect,
     pub bottom_left: Rect,
@@ -17,6 +18,7 @@ impl AppLayout {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),  // header
+                Constraint::Length(1),  // filter bar
                 Constraint::Min(10),   // packet table
                 Constraint::Length(10), // detail tree
                 Constraint::Length(8),  // bottom panes
@@ -30,15 +32,16 @@ impl AppLayout {
                 Constraint::Percentage(50),
                 Constraint::Percentage(50),
             ])
-            .split(main_chunks[3]);
+            .split(main_chunks[4]);
 
         Self {
             header: main_chunks[0],
-            packet_table: main_chunks[1],
-            detail_tree: main_chunks[2],
+            filter_bar: main_chunks[1],
+            packet_table: main_chunks[2],
+            detail_tree: main_chunks[3],
             bottom_left: bottom_chunks[0],
             bottom_right: bottom_chunks[1],
-            status_bar: main_chunks[4],
+            status_bar: main_chunks[5],
         }
     }
 }

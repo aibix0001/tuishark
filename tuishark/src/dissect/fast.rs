@@ -12,6 +12,8 @@ pub fn parse_packet_with_wire_len(index: usize, timestamp: f64, data: &[u8], ori
     let mut destination = String::new();
     let mut protocol = Protocol::Unknown("???".into());
     let mut info = String::new();
+    let mut src_port: Option<u16> = None;
+    let mut dst_port: Option<u16> = None;
 
     if let Ok(parsed) = SlicedPacket::from_ethernet(data) {
         // Link layer
@@ -39,17 +41,21 @@ pub fn parse_packet_with_wire_len(index: usize, timestamp: f64, data: &[u8], ori
         // Transport layer
         match &parsed.transport {
             Some(TransportSlice::Tcp(tcp)) => {
-                let src_port = tcp.source_port();
-                let dst_port = tcp.destination_port();
-                protocol = classify_tcp_port(src_port, dst_port);
+                let sp = tcp.source_port();
+                let dp = tcp.destination_port();
+                src_port = Some(sp);
+                dst_port = Some(dp);
+                protocol = classify_tcp_port(sp, dp);
                 info = format_tcp_info(tcp);
             }
             Some(TransportSlice::Udp(udp)) => {
-                let src_port = udp.source_port();
-                let dst_port = udp.destination_port();
-                protocol = classify_udp_port(src_port, dst_port);
+                let sp = udp.source_port();
+                let dp = udp.destination_port();
+                src_port = Some(sp);
+                dst_port = Some(dp);
+                protocol = classify_udp_port(sp, dp);
                 info = format!(
-                    "{src_port} → {dst_port} Len={}",
+                    "{sp} → {dp} Len={}",
                     udp.length().saturating_sub(8)
                 );
             }
@@ -88,6 +94,8 @@ pub fn parse_packet_with_wire_len(index: usize, timestamp: f64, data: &[u8], ori
         length: data.len(),
         original_length,
         info,
+        src_port,
+        dst_port,
     }
 }
 

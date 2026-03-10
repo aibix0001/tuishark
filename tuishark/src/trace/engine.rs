@@ -1,0 +1,80 @@
+use super::model::{FlowKey, ProcessInfo};
+
+#[cfg(feature = "trace")]
+use aya::{
+    maps::HashMap as BpfHashMap,
+    programs::KProbe,
+    Ebpf,
+};
+
+/// Manages the eBPF programs and provides map lookup for process info.
+#[cfg(feature = "trace")]
+pub struct TraceEngine {
+    bpf: Ebpf,
+}
+
+#[cfg(feature = "trace")]
+impl TraceEngine {
+    /// Load and attach eBPF programs.
+    /// Returns Err if eBPF cannot be loaded (permissions, kernel, etc.).
+    pub fn new() -> Result<Self, String> {
+        let ebpf_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/tuishark-ebpf"));
+
+        let mut bpf = Ebpf::load(ebpf_bytes).map_err(|e| format!("Failed to load eBPF: {e}"))?;
+
+        // Attach kprobes
+        let probes = [
+            ("trace_tcp_sendmsg", "tcp_sendmsg"),
+            ("trace_tcp_recvmsg", "tcp_recvmsg"),
+            ("trace_udp_sendmsg", "udp_sendmsg"),
+            ("trace_udp_recvmsg", "udp_recvmsg"),
+        ];
+
+        for (prog_name, fn_name) in &probes {
+            let program: &mut KProbe = bpf
+                .program_mut(prog_name)
+                .ok_or_else(|| format!("eBPF program '{prog_name}' not found in object"))?
+                .try_into()
+                .map_err(|e| format!("Failed to get kprobe '{prog_name}': {e}"))?;
+            program
+                .load()
+                .map_err(|e| format!("Failed to load kprobe '{prog_name}': {e}"))?;
+            program
+                .attach(fn_name, 0)
+                .map_err(|e| format!("Failed to attach kprobe to '{fn_name}': {e}"))?;
+        }
+
+        Ok(Self { bpf })
+    }
+
+    /// Look up process info for a flow in the BPF map.
+    /// Tries the forward key first, then the reverse (for received packets).
+    pub fn lookup(&mut self, key: &FlowKey) -> Option<ProcessInfo> {
+        let map = self.bpf.map_mut("FLOW_MAP")?;
+        let hash_map: BpfHashMap<_, FlowKey, ProcessInfo> = map.try_into().ok()?;
+
+        // Try forward direction first
+        if let Ok(info) = hash_map.get(key, 0) {
+            return Some(info);
+        }
+
+        // Try reverse (the packet may have been captured on the receive path)
+        let rev = key.reverse();
+        hash_map.get(&rev, 0).ok()
+    }
+}
+
+/// Stub engine when the trace feature is not compiled.
+#[cfg(not(feature = "trace"))]
+pub struct TraceEngine;
+
+#[cfg(not(feature = "trace"))]
+impl TraceEngine {
+    pub fn new() -> Result<Self, String> {
+        Err("Not compiled with eBPF support (build with --features trace)".into())
+    }
+
+    pub fn lookup(&mut self, _key: &FlowKey) -> Option<ProcessInfo> {
+        None
+    }
+}

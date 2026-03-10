@@ -8,6 +8,10 @@ description = "Modern console-based packet analyzer"
 name = "tuishark"
 path = "src/main.rs"
 
+[features]
+default = []
+trace = ["aya"]
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
@@ -21,3 +25,4 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+aya = { version = "0.13", optional = true }

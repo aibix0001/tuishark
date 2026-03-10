@@ -7,6 +7,7 @@ mod export;
 mod filter;
 mod session;
 mod store;
+mod trace;
 mod tui;
 mod ui;
 
@@ -33,6 +34,10 @@ struct Cli {
     /// Disable deep dissection (tshark), use etherparse-only mode
     #[arg(long = "no-deep")]
     no_deep: bool,
+
+    /// Enable eBPF kernel tracing (requires root or CAP_BPF)
+    #[arg(long = "trace")]
+    trace: bool,
 }
 
 fn main() -> Result<()> {
@@ -68,7 +73,7 @@ fn main() -> Result<()> {
     };
 
     let mut terminal = tui::init()?;
-    let result = app::App::new(cli.file, cli.interface, enable_deep).run(&mut terminal);
+    let result = app::App::new(cli.file, cli.interface, enable_deep, cli.trace).run(&mut terminal);
     tui::restore()?;
 
     result

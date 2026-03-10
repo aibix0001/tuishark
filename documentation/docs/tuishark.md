@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10"]
 related_mrs: ["!2", "!4", "!7"]
 ---
 
@@ -48,7 +48,7 @@ cargo build --release
 | `g` / `G` | Jump to first / last packet |
 | `PageUp` / `PageDown` | Jump 20 packets |
 | `Tab` / `Shift+Tab` | Cycle panes forward / backward |
-| `1` / `2` / `3` | Focus packet table / detail tree / hex view |
+| `1` / `2` / `3` / `4` | Focus packet table / detail tree / hex view / kernel trace |
 | `Enter` or `Space` | Expand/collapse protocol layer |
 | `/` | Open filter bar (type expression, Enter to apply, Esc to cancel) |
 | `s` | Open save dialog |
@@ -162,8 +162,27 @@ The filter applies as a view layer — no packets are deleted, just hidden. Duri
 
 **Note:** `ip.addr != X` uses OR semantics (matches if *either* address differs from X), consistent with Wireshark. To exclude an address entirely, use `!(ip.addr == X)`.
 
+### eBPF kernel tracing (Phase 6)
+
+TuiShark can use eBPF to identify which process (PID, process name, UID) sent or received each packet during live capture. This is displayed in the Kernel Trace pane (bottom-right).
+
+**Requirements:**
+- Build with `cargo build --features trace`
+- Run with `--trace` flag
+- Requires root or `CAP_BPF` + `CAP_PERFMON` + `CAP_NET_ADMIN`
+- Linux kernel 5.8+
+
+**How it works:**
+- Four kprobes attach to `tcp_sendmsg`, `tcp_recvmsg`, `udp_sendmsg`, `udp_recvmsg`
+- Each kprobe maps the packet's 5-tuple (src/dst IP, src/dst port, protocol) to the calling process
+- When pcap captures a packet, TuiShark looks up the 5-tuple in the eBPF map to find the process
+- Only works for TCP/UDP packets during live capture; file mode shows "N/A"
+
+**Graceful fallback:** If eBPF is unavailable (no permissions, old kernel, not compiled with the feature), the app continues to work normally — only the Kernel Trace pane shows a status message instead of process info.
+
 ## Changelog
 
+- 2026-03-10: Phase 6 — eBPF kernel tracing: per-packet process identification
 - 2026-03-10: Phase 5 — display filter engine: expression parser, evaluator, filter bar UI
 - 2026-03-10: Phase 4 — session management: save/open pcap files, recent files, quit confirmation
 - 2026-03-10: Phase 3 — added deep dissection via tshark, hex byte highlighting, field-level selection

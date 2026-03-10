@@ -3,8 +3,8 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7"]
-related_mrs: ["!2", "!4"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8"]
+related_mrs: ["!2", "!4", "!7"]
 ---
 
 ## Overview
@@ -50,6 +50,7 @@ cargo build --release
 | `Tab` / `Shift+Tab` | Cycle panes forward / backward |
 | `1` / `2` / `3` | Focus packet table / detail tree / hex view |
 | `Enter` or `Space` | Expand/collapse protocol layer |
+| `/` | Open filter bar (type expression, Enter to apply, Esc to cancel) |
 | `s` | Open save dialog |
 | `w` | Quick save (reuse last path) |
 | `o` | Open file / recent files dialog |
@@ -77,6 +78,8 @@ The application follows a 4-pane layout:
 ```
 ┌─────────────────────────────────────────┐
 │ Header (app name, file path, theme)     │
+├─────────────────────────────────────────┤
+│ Filter Bar (/ to activate)              │
 ├─────────────────────────────────────────┤
 │ Packet Table (virtual scrolling)        │
 ├─────────────────────────────────────────┤
@@ -119,7 +122,48 @@ Save and open pcap files from within the TUI. Press `s` to save captured packets
 
 Recent files (last 10) are tracked in `~/.config/tuishark/recent.json` and persist across sessions.
 
+### Display filter engine (Phase 5)
+
+Press `/` to activate the filter bar and type a Wireshark-style display filter expression. Press `Enter` to apply or `Esc` to cancel. The filter bar shows visual feedback: blue while editing, green when a valid filter is active, red on parse error. The status bar shows a `FILTER: matched/total` badge when filtering is active.
+
+#### Supported filter fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ip.src` | string | Source IP address |
+| `ip.dst` | string | Destination IP address |
+| `ip.addr` | string | Matches either source or destination |
+| `port.src` | integer | Source port (TCP/UDP) |
+| `port.dst` | integer | Destination port (TCP/UDP) |
+| `port` | integer | Matches either source or destination port |
+| `proto` | string | Protocol name (case-insensitive, e.g. `tcp`, `udp`, `dns`, `https`) |
+| `len` | integer | Packet wire length in bytes |
+| `info` | string | Info column text |
+
+#### Operators
+
+- **Comparison:** `==`, `!=`, `>`, `<`, `>=`, `<=`
+- **String:** `contains` (case-insensitive substring match)
+- **Boolean:** `and` / `&&`, `or` / `||`, `not` / `!`
+- **Grouping:** parentheses `()`
+
+#### Example expressions
+
+```
+proto == tcp
+ip.src == 192.168.1.1 and port.dst == 443
+proto == dns or proto == udp
+not proto == arp
+len > 1000 and (proto == tcp or proto == udp)
+info contains "SYN"
+```
+
+The filter applies as a view layer — no packets are deleted, just hidden. During live capture, new packets are checked incrementally against the active filter. Clearing the filter (empty expression + Enter) restores the full packet list.
+
+**Note:** `ip.addr != X` uses OR semantics (matches if *either* address differs from X), consistent with Wireshark. To exclude an address entirely, use `!(ip.addr == X)`.
+
 ## Changelog
 
+- 2026-03-10: Phase 5 — display filter engine: expression parser, evaluator, filter bar UI
 - 2026-03-10: Phase 4 — session management: save/open pcap files, recent files, quit confirmation
 - 2026-03-10: Phase 3 — added deep dissection via tshark, hex byte highlighting, field-level selection

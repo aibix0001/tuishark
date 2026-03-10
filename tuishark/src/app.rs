@@ -6,6 +6,7 @@ use crate::capture::file::load_pcap;
 use crate::capture::live::{list_interfaces, InterfaceInfo, LiveCapture};
 use crate::dissect::fast::dissect_detail;
 use crate::dissect::model::PacketDetail;
+use crate::dissect::deep::next_request_seq;
 use crate::dissect::worker::{DissectRequest, DissectWorker};
 use crate::event::{Event, EventHandler};
 use crate::store::packet_store::PacketStore;
@@ -97,12 +98,19 @@ pub struct App {
     // Deep dissection
     dissect_worker: Option<DissectWorker>,
     dissect_state: DissectState,
+    dissect_seq: usize,
 }
 
 impl App {
     pub fn new(file: Option<PathBuf>, interface: Option<String>, enable_deep: bool) -> Self {
         let dissect_worker = if enable_deep {
-            DissectWorker::spawn()
+            match DissectWorker::try_spawn() {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    eprintln!("Warning: deep dissection unavailable: {e}");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -132,6 +140,7 @@ impl App {
             status_message: None,
             dissect_worker,
             dissect_state: DissectState::Fast,
+            dissect_seq: 0,
         }
     }
 
@@ -239,29 +248,43 @@ impl App {
 
     fn drain_deep_results(&mut self) {
         // Collect results first to avoid borrow conflict
-        let results: Vec<_> = self
-            .dissect_worker
-            .as_ref()
-            .map(|w| {
+        let (results, worker_alive) = match self.dissect_worker.as_ref() {
+            Some(w) => {
                 let mut v = Vec::new();
                 while let Some(r) = w.try_recv() {
                     v.push(r);
                 }
-                v
-            })
-            .unwrap_or_default();
+                (v, w.is_alive())
+            }
+            None => return,
+        };
+
+        // Detect dead worker
+        if !worker_alive && self.dissect_state == DissectState::DeepPending {
+            self.dissect_state = DissectState::Fast;
+            self.status_message = Some("Deep dissection worker died".into());
+        }
 
         for result in results {
-            if self.selected_packet == Some(result.index) {
-                if let Some(detail) = result.detail {
-                    let layer_count = detail.layers.len();
-                    self.detail = Some(detail);
-                    self.expanded_layers = vec![true; layer_count];
-                    self.selected_layer = if layer_count > 0 { Some(0) } else { None };
-                    self.selected_field = None;
-                    self.dissect_state = DissectState::Deep;
-                    self.update_highlight();
-                }
+            // Only apply if this result matches our current request
+            if result.seq != self.dissect_seq {
+                continue;
+            }
+            if self.selected_packet != Some(result.index) {
+                continue;
+            }
+
+            if let Some(detail) = result.detail {
+                let layer_count = detail.layers.len();
+                self.detail = Some(detail);
+                self.expanded_layers = vec![true; layer_count];
+                self.selected_layer = if layer_count > 0 { Some(0) } else { None };
+                self.selected_field = None;
+                self.dissect_state = DissectState::Deep;
+                self.update_highlight();
+            } else if let Some(err) = result.error {
+                self.dissect_state = DissectState::Fast;
+                self.status_message = Some(format!("Deep dissection failed: {err}"));
             }
         }
     }
@@ -704,13 +727,13 @@ impl App {
     fn select_packet(&mut self, index: usize) {
         self.selected_packet = Some(index);
 
-        // Clone raw data to avoid borrow conflict with &mut self
+        // Clone raw data upfront to avoid borrow conflict with &mut self
         let raw_owned = self.store.get_raw(index).map(|r| r.to_vec());
         let timestamp = self.store.get(index).map(|s| s.timestamp).unwrap_or(0.0);
 
-        if let Some(ref raw) = raw_owned {
+        if let Some(raw) = raw_owned {
             // Fast dissection (immediate)
-            let detail = dissect_detail(raw);
+            let detail = dissect_detail(&raw);
             let layer_count = detail.layers.len();
             self.detail = Some(detail);
             self.expanded_layers = vec![true; layer_count];
@@ -719,14 +742,20 @@ impl App {
             self.dissect_state = DissectState::Fast;
             self.update_highlight();
 
-            // Queue deep dissection if worker is available
+            // Queue deep dissection if worker is available and alive
             if let Some(ref worker) = self.dissect_worker {
-                worker.request(DissectRequest {
-                    index,
-                    raw: raw.clone(),
-                    timestamp,
-                });
-                self.dissect_state = DissectState::DeepPending;
+                if worker.is_alive() {
+                    let seq = next_request_seq();
+                    self.dissect_seq = seq;
+                    let req = DissectRequest {
+                        index,
+                        seq,
+                        raw, // move owned vec, no extra clone
+                        timestamp,
+                    };
+                    worker.request(&req);
+                    self.dissect_state = DissectState::DeepPending;
+                }
             }
         }
 

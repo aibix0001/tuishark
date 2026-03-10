@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use super::deep::DeepDissector;
@@ -8,6 +10,8 @@ use super::model::PacketDetail;
 pub struct DissectRequest {
     /// Packet index — used to correlate with the currently selected packet.
     pub index: usize,
+    /// Monotonically increasing sequence number to detect stale requests.
+    pub seq: usize,
     /// Raw packet bytes.
     pub raw: Vec<u8>,
     /// Packet timestamp (seconds since epoch or relative).
@@ -18,48 +22,69 @@ pub struct DissectRequest {
 pub struct DissectResult {
     /// Packet index this result corresponds to.
     pub index: usize,
+    /// Sequence number matching the request.
+    pub seq: usize,
     /// Deep dissection detail, or None if dissection failed.
     pub detail: Option<PacketDetail>,
+    /// Error message if dissection failed.
+    pub error: Option<String>,
 }
 
 /// Background worker that processes deep dissection requests.
 pub struct DissectWorker {
     request_tx: mpsc::Sender<DissectRequest>,
     result_rx: mpsc::Receiver<DissectResult>,
+    latest_seq: Arc<AtomicUsize>,
+    alive: Arc<AtomicBool>,
 }
 
 impl DissectWorker {
     /// Spawn a new background dissection worker thread.
-    /// Returns None if tshark/DeepDissector fails to initialize.
-    pub fn spawn() -> Option<Self> {
+    /// Returns `Err` with a description if tshark/DeepDissector fails to initialize.
+    pub fn try_spawn() -> Result<Self, String> {
         let (request_tx, request_rx) = mpsc::channel::<DissectRequest>();
         let (result_tx, result_rx) = mpsc::channel::<DissectResult>();
+        let latest_seq = Arc::new(AtomicUsize::new(0));
+        let alive = Arc::new(AtomicBool::new(true));
 
-        // Try to create the dissector — if it fails, tshark isn't available
-        let dissector = match DeepDissector::new() {
-            Ok(d) => d,
-            Err(_) => return None,
-        };
+        let dissector = DeepDissector::new_ethernet().map_err(|e| format!("{e:#}"))?;
 
+        let seq_clone = latest_seq.clone();
+        let alive_clone = alive.clone();
         thread::spawn(move || {
-            worker_loop(dissector, request_rx, result_tx);
+            worker_loop(dissector, request_rx, result_tx, seq_clone);
+            alive_clone.store(false, Ordering::Release);
         });
 
-        Some(Self {
+        Ok(Self {
             request_tx,
             result_rx,
+            latest_seq,
+            alive,
         })
     }
 
     /// Send a dissection request to the worker.
-    pub fn request(&self, req: DissectRequest) {
+    /// Updates the latest sequence number so the worker can skip stale requests.
+    pub fn request(&self, req: &DissectRequest) {
+        self.latest_seq.store(req.seq, Ordering::Release);
         // Ignore send errors — worker may have died
-        let _ = self.request_tx.send(req);
+        let _ = self.request_tx.send(DissectRequest {
+            index: req.index,
+            seq: req.seq,
+            raw: req.raw.clone(),
+            timestamp: req.timestamp,
+        });
     }
 
     /// Try to receive a completed dissection result (non-blocking).
     pub fn try_recv(&self) -> Option<DissectResult> {
         self.result_rx.try_recv().ok()
+    }
+
+    /// Check if the worker thread is still alive.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 }
 
@@ -67,15 +92,24 @@ fn worker_loop(
     mut dissector: DeepDissector,
     request_rx: mpsc::Receiver<DissectRequest>,
     result_tx: mpsc::Sender<DissectResult>,
+    latest_seq: Arc<AtomicUsize>,
 ) {
     while let Ok(req) = request_rx.recv() {
-        let detail = dissector
-            .dissect_packet(&req.raw, req.timestamp)
-            .ok();
+        // Skip stale requests — only process the latest
+        if req.seq < latest_seq.load(Ordering::Acquire) {
+            continue;
+        }
+
+        let (detail, error) = match dissector.dissect_packet(&req.raw, req.timestamp) {
+            Ok(d) => (Some(d), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
 
         let result = DissectResult {
             index: req.index,
+            seq: req.seq,
             detail,
+            error,
         };
 
         if result_tx.send(result).is_err() {

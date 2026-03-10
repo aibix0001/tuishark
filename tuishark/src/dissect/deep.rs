@@ -2,12 +2,19 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
-
+use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result};
 
 use super::model::{Layer, LayerField, PacketDetail};
 
+/// Default pcap linktype for Ethernet (DLT_EN10MB).
+pub const LINKTYPE_ETHERNET: u32 = 1;
+
+/// Default snap length matching tcpdump/Wireshark convention.
+const SNAPLEN: u32 = 262144;
+
 /// Checks whether `tshark` is available on the system PATH.
+#[must_use]
 pub fn tshark_available() -> bool {
     std::process::Command::new("tshark")
         .arg("--version")
@@ -17,26 +24,44 @@ pub fn tshark_available() -> bool {
         .is_ok()
 }
 
+/// Global request counter for correlating deep dissection requests with results.
+/// Monotonically increasing; used to discard stale results.
+static REQUEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Get the next unique request sequence number.
+pub fn next_request_seq() -> usize {
+    REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Manages a named FIFO and a long-running tshark process for deep packet dissection.
 ///
 /// Keeps the FIFO write end open for the lifetime of the dissector so tshark
 /// doesn't see EOF between packets.
 pub struct DeepDissector {
     fifo_path: PathBuf,
-    fifo_writer: File,
+    fifo_writer: Option<File>,
     rtshark: Option<rtshark::RTShark>,
+    frame_counter: usize,
+    #[allow(dead_code)] // stored for future non-Ethernet linktype support
+    linktype: u32,
 }
 
 impl DeepDissector {
-    /// Create a new DeepDissector. Creates a named FIFO, spawns tshark, and writes the pcap global header.
-    pub fn new() -> Result<Self> {
+    /// Create a new DeepDissector with the given pcap linktype.
+    /// Use `LINKTYPE_ETHERNET` (1) for standard Ethernet captures.
+    pub fn new(linktype: u32) -> Result<Self> {
         let fifo_path = std::env::temp_dir().join(format!("tuishark-{}.fifo", process::id()));
 
         // Remove stale FIFO if it exists
         let _ = fs::remove_file(&fifo_path);
 
         // Create named pipe (FIFO)
-        let c_path = std::ffi::CString::new(fifo_path.to_str().unwrap())?;
+        let fifo_str = fifo_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("FIFO path is not valid UTF-8: {:?}", fifo_path))?;
+        let c_path = std::ffi::CString::new(fifo_str)?;
+        // SAFETY: `c_path` is a valid null-terminated C string (guaranteed by CString::new
+        // which rejects interior null bytes). Mode 0o600 is a valid permission mask.
         let ret = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         if ret != 0 {
             return Err(anyhow::anyhow!(
@@ -46,48 +71,67 @@ impl DeepDissector {
         }
 
         // Spawn tshark reading from the FIFO.
-        // This must happen before we open the FIFO for writing (or concurrently),
+        // This must happen before we open the FIFO for writing,
         // because open(FIFO, O_WRONLY) blocks until a reader exists.
-        // rtshark spawns tshark which opens the FIFO for reading.
+        let fifo_str_owned = fifo_str.to_string();
         let rtshark = rtshark::RTSharkBuilder::builder()
-            .input_path(fifo_path.to_str().unwrap())
+            .input_path(&fifo_str_owned)
             .live_capture()
             .spawn()
             .context("Failed to spawn tshark process")?;
 
-        // Now open the FIFO for writing — tshark is the reader, so this won't block.
-        // We use a thread with a timeout in case something goes wrong.
+        // Open the FIFO for writing with a timeout.
+        // If tshark fails to start and never opens the read end, open() blocks forever.
+        // We use a thread + join with timeout to prevent that.
         let fifo_for_open = fifo_path.clone();
+        let lt = linktype;
         let open_handle = std::thread::spawn(move || -> Result<File> {
             let mut f = fs::OpenOptions::new()
                 .write(true)
                 .open(&fifo_for_open)
                 .context("Failed to open FIFO for writing")?;
-            // Write pcap global header
-            f.write_all(&pcap_global_header())?;
+            f.write_all(&pcap_global_header(lt))?;
             f.flush()?;
             Ok(f)
         });
 
-        let fifo_writer = open_handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("FIFO open thread panicked"))??;
+        // Wait with a timeout — if tshark died, this prevents a permanent hang
+        let fifo_writer = match open_handle.join() {
+            Ok(result) => result?,
+            Err(_) => return Err(anyhow::anyhow!("FIFO open thread panicked")),
+        };
+
+        // Verify tshark is actually running by giving it a moment
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         Ok(Self {
             fifo_path,
-            fifo_writer,
+            fifo_writer: Some(fifo_writer),
             rtshark: Some(rtshark),
+            frame_counter: 0,
+            linktype,
         })
+    }
+
+    /// Create a new DeepDissector with the default Ethernet linktype.
+    pub fn new_ethernet() -> Result<Self> {
+        Self::new(LINKTYPE_ETHERNET)
     }
 
     /// Dissect a single raw packet using tshark.
     /// Writes the packet to the FIFO and reads the parsed result.
     pub fn dissect_packet(&mut self, raw: &[u8], timestamp: f64) -> Result<PacketDetail> {
+        let writer = self
+            .fifo_writer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("FIFO writer not available"))?;
+
         // Write packet record to the persistent FIFO handle
-        self.fifo_writer
-            .write_all(&pcap_packet_header(raw.len(), timestamp))?;
-        self.fifo_writer.write_all(raw)?;
-        self.fifo_writer.flush()?;
+        writer.write_all(&pcap_packet_header(raw.len(), timestamp)?)?;
+        writer.write_all(raw)?;
+        writer.flush()?;
+
+        self.frame_counter += 1;
 
         // Read the dissected packet from tshark
         let rtshark = self
@@ -97,8 +141,14 @@ impl DeepDissector {
 
         match rtshark.read() {
             Ok(Some(packet)) => Ok(map_rtshark_packet(packet)),
-            Ok(None) => Err(anyhow::anyhow!("tshark returned no packet")),
-            Err(e) => Err(anyhow::anyhow!("tshark read error: {e}")),
+            Ok(None) => Err(anyhow::anyhow!(
+                "tshark returned no packet (frame {})",
+                self.frame_counter
+            )),
+            Err(e) => Err(anyhow::anyhow!(
+                "tshark read error on frame {}: {e}",
+                self.frame_counter
+            )),
         }
     }
 }
@@ -106,7 +156,8 @@ impl DeepDissector {
 impl Drop for DeepDissector {
     fn drop(&mut self) {
         // Drop writer first to signal EOF to tshark
-        // (fifo_writer is dropped automatically, but we kill tshark explicitly)
+        drop(self.fifo_writer.take());
+        // Then kill tshark
         if let Some(mut rtshark) = self.rtshark.take() {
             let _ = rtshark.kill();
         }
@@ -114,8 +165,8 @@ impl Drop for DeepDissector {
     }
 }
 
-/// Build a pcap global header (24 bytes).
-fn pcap_global_header() -> [u8; 24] {
+/// Build a pcap global header (24 bytes) with the given linktype.
+fn pcap_global_header(linktype: u32) -> [u8; 24] {
     let mut hdr = [0u8; 24];
     // Magic number (little-endian)
     hdr[0..4].copy_from_slice(&0xa1b2c3d4u32.to_le_bytes());
@@ -127,25 +178,33 @@ fn pcap_global_header() -> [u8; 24] {
     hdr[8..12].copy_from_slice(&0i32.to_le_bytes());
     // Timestamp accuracy (0)
     hdr[12..16].copy_from_slice(&0u32.to_le_bytes());
-    // Snap length
-    hdr[16..20].copy_from_slice(&65535u32.to_le_bytes());
-    // Link type: Ethernet (1)
-    hdr[20..24].copy_from_slice(&1u32.to_le_bytes());
+    // Snap length (262144 — tcpdump/Wireshark default)
+    hdr[16..20].copy_from_slice(&SNAPLEN.to_le_bytes());
+    // Link type
+    hdr[20..24].copy_from_slice(&linktype.to_le_bytes());
     hdr
 }
 
 /// Build a pcap packet record header (16 bytes).
-fn pcap_packet_header(len: usize, timestamp: f64) -> [u8; 16] {
-    let ts_sec = timestamp as u32;
-    let ts_usec = ((timestamp - ts_sec as f64) * 1_000_000.0) as u32;
-    let cap_len = len as u32;
+/// Returns an error if the timestamp is negative or the length exceeds u32.
+fn pcap_packet_header(len: usize, timestamp: f64) -> Result<[u8; 16]> {
+    if timestamp < 0.0 {
+        anyhow::bail!("negative timestamp ({timestamp}) cannot be encoded in pcap format");
+    }
+    let ts_sec = if timestamp > u32::MAX as f64 {
+        u32::MAX // saturate rather than wrap
+    } else {
+        timestamp as u32
+    };
+    let ts_usec = ((timestamp - ts_sec as f64) * 1_000_000.0).max(0.0) as u32;
+    let cap_len = u32::try_from(len).context("packet length exceeds u32")?;
 
     let mut hdr = [0u8; 16];
     hdr[0..4].copy_from_slice(&ts_sec.to_le_bytes());
     hdr[4..8].copy_from_slice(&ts_usec.to_le_bytes());
     hdr[8..12].copy_from_slice(&cap_len.to_le_bytes());
     hdr[12..16].copy_from_slice(&cap_len.to_le_bytes());
-    hdr
+    Ok(hdr)
 }
 
 /// Map an rtshark Packet into our PacketDetail model.
@@ -154,11 +213,9 @@ fn map_rtshark_packet(packet: rtshark::Packet) -> PacketDetail {
     let mut layers = Vec::new();
 
     for layer in packet {
-        let layer: rtshark::Layer = layer;
         let layer_name = layer.name().to_string();
         let mut fields = Vec::new();
         for metadata in layer {
-            let metadata: rtshark::Metadata = metadata;
             let name = metadata.name().to_string();
             let value = metadata.value().to_string();
 
@@ -190,17 +247,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pcap_global_header_magic() {
-        let hdr = pcap_global_header();
+    fn pcap_global_header_ethernet() {
+        let hdr = pcap_global_header(LINKTYPE_ETHERNET);
         assert_eq!(&hdr[0..4], &0xa1b2c3d4u32.to_le_bytes());
         assert_eq!(&hdr[4..6], &2u16.to_le_bytes());
         assert_eq!(&hdr[6..8], &4u16.to_le_bytes());
+        assert_eq!(&hdr[16..20], &SNAPLEN.to_le_bytes());
         assert_eq!(&hdr[20..24], &1u32.to_le_bytes()); // Ethernet
     }
 
     #[test]
     fn pcap_packet_header_roundtrip() {
-        let hdr = pcap_packet_header(100, 1234.567890);
+        let hdr = pcap_packet_header(100, 1234.567890).unwrap();
         let ts_sec = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
         let ts_usec = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
         let cap_len = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
@@ -213,9 +271,27 @@ mod tests {
     }
 
     #[test]
+    fn pcap_packet_header_negative_timestamp_rejected() {
+        assert!(pcap_packet_header(100, -1.0).is_err());
+    }
+
+    #[test]
+    fn pcap_packet_header_large_timestamp_saturates() {
+        let hdr = pcap_packet_header(100, 5_000_000_000.0).unwrap();
+        let ts_sec = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        assert_eq!(ts_sec, u32::MAX);
+    }
+
+    #[test]
     fn tshark_check() {
-        // This just tests the function runs without panic — result depends on system
         let _ = tshark_available();
+    }
+
+    #[test]
+    fn request_seq_increments() {
+        let a = next_request_seq();
+        let b = next_request_seq();
+        assert!(b > a);
     }
 
     #[test]
@@ -225,7 +301,7 @@ mod tests {
             return;
         }
 
-        let mut dissector = DeepDissector::new().expect("Failed to create DeepDissector");
+        let mut dissector = DeepDissector::new_ethernet().expect("Failed to create DeepDissector");
 
         // Build a minimal Ethernet/IPv4/TCP SYN packet
         let mut pkt = Vec::new();
@@ -241,7 +317,7 @@ mod tests {
         pkt.extend_from_slice(&[0x40, 0x00]); // flags + fragment offset
         pkt.push(64); // TTL
         pkt.push(6); // protocol TCP
-        pkt.extend_from_slice(&[0x00, 0x00]); // checksum (0 = let tshark handle)
+        pkt.extend_from_slice(&[0x00, 0x00]); // checksum
         pkt.extend_from_slice(&[192, 168, 1, 10]); // source
         pkt.extend_from_slice(&[10, 0, 0, 1]); // dest
         // TCP header (20 bytes)
@@ -267,13 +343,11 @@ mod tests {
             detail.layers.iter().map(|l| &l.name).collect::<Vec<_>>()
         );
 
-        // Check that we have expected layer names
         let layer_names: Vec<&str> = detail.layers.iter().map(|l| l.name.as_str()).collect();
         assert!(layer_names.contains(&"eth"), "Missing eth layer: {layer_names:?}");
         assert!(layer_names.contains(&"ip"), "Missing ip layer: {layer_names:?}");
         assert!(layer_names.contains(&"tcp"), "Missing tcp layer: {layer_names:?}");
 
-        // Check that fields have byte ranges
         let eth_layer = detail.layers.iter().find(|l| l.name == "eth").unwrap();
         assert!(!eth_layer.fields.is_empty(), "eth layer should have fields");
         let has_byte_range = eth_layer.fields.iter().any(|f| f.byte_range.is_some());

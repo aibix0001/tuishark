@@ -65,16 +65,12 @@ impl DissectWorker {
     }
 
     /// Send a dissection request to the worker.
+    /// Takes ownership of the request to avoid an extra clone.
     /// Updates the latest sequence number so the worker can skip stale requests.
-    pub fn request(&self, req: &DissectRequest) {
+    pub fn request(&self, req: DissectRequest) {
         self.latest_seq.store(req.seq, Ordering::Release);
         // Ignore send errors — worker may have died
-        let _ = self.request_tx.send(DissectRequest {
-            index: req.index,
-            seq: req.seq,
-            raw: req.raw.clone(),
-            timestamp: req.timestamp,
-        });
+        let _ = self.request_tx.send(req);
     }
 
     /// Try to receive a completed dissection result (non-blocking).

@@ -747,13 +747,12 @@ impl App {
                 if worker.is_alive() {
                     let seq = next_request_seq();
                     self.dissect_seq = seq;
-                    let req = DissectRequest {
+                    worker.request(DissectRequest {
                         index,
                         seq,
                         raw, // move owned vec, no extra clone
                         timestamp,
-                    };
-                    worker.request(&req);
+                    });
                     self.dissect_state = DissectState::DeepPending;
                 }
             }

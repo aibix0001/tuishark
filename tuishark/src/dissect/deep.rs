@@ -82,24 +82,26 @@ impl DeepDissector {
 
         // Open the FIFO for writing with a timeout.
         // If tshark fails to start and never opens the read end, open() blocks forever.
-        // We use a thread + join with timeout to prevent that.
+        // We use a thread + channel with recv_timeout to prevent a permanent hang.
         let fifo_for_open = fifo_path.clone();
         let lt = linktype;
-        let open_handle = std::thread::spawn(move || -> Result<File> {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .open(&fifo_for_open)
-                .context("Failed to open FIFO for writing")?;
-            f.write_all(&pcap_global_header(lt))?;
-            f.flush()?;
-            Ok(f)
+        let (open_tx, open_rx) = std::sync::mpsc::channel::<Result<File>>();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<File> {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .open(&fifo_for_open)
+                    .context("Failed to open FIFO for writing")?;
+                f.write_all(&pcap_global_header(lt))?;
+                f.flush()?;
+                Ok(f)
+            })();
+            let _ = open_tx.send(result);
         });
 
-        // Wait with a timeout — if tshark died, this prevents a permanent hang
-        let fifo_writer = match open_handle.join() {
-            Ok(result) => result?,
-            Err(_) => return Err(anyhow::anyhow!("FIFO open thread panicked")),
-        };
+        let fifo_writer = open_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| anyhow::anyhow!("Timeout opening FIFO — tshark may have failed to start"))??;
 
         // Verify tshark is actually running by giving it a moment
         std::thread::sleep(std::time::Duration::from_millis(50));

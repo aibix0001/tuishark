@@ -13,6 +13,7 @@ pub struct DetailTree<'a> {
     detail: Option<&'a PacketDetail>,
     expanded: &'a [bool],
     selected_layer: Option<usize>,
+    selected_field: Option<usize>,
     theme: &'a Theme,
     focused: bool,
 }
@@ -22,6 +23,7 @@ impl<'a> DetailTree<'a> {
         detail: Option<&'a PacketDetail>,
         expanded: &'a [bool],
         selected_layer: Option<usize>,
+        selected_field: Option<usize>,
         theme: &'a Theme,
         focused: bool,
     ) -> Self {
@@ -29,6 +31,7 @@ impl<'a> DetailTree<'a> {
             detail,
             expanded,
             selected_layer,
+            selected_field,
             theme,
             focused,
         }
@@ -62,7 +65,7 @@ impl Widget for DetailTree<'_> {
 
         for (i, layer) in detail.layers.iter().enumerate() {
             let is_expanded = self.expanded.get(i).copied().unwrap_or(true);
-            let is_selected = self.selected_layer == Some(i);
+            let is_selected = self.selected_layer == Some(i) && self.selected_field.is_none();
 
             let arrow = if is_expanded { "▾" } else { "▸" };
             let layer_style = if is_selected {
@@ -82,13 +85,40 @@ impl Widget for DetailTree<'_> {
             )));
 
             if is_expanded {
-                for field in &layer.fields {
-                    lines.push(Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(&field.name, Style::default().fg(self.theme.subtext1)),
-                        Span::styled(": ", Style::default().fg(self.theme.overlay0)),
-                        Span::styled(&field.value, Style::default().fg(self.theme.text)),
-                    ]));
+                for (fi, field) in layer.fields.iter().enumerate() {
+                    let is_field_selected = self.selected_layer == Some(i)
+                        && self.selected_field == Some(fi);
+
+                    if is_field_selected {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", Style::default().bg(self.theme.surface1)),
+                            Span::styled(
+                                &field.name,
+                                Style::default()
+                                    .fg(self.theme.base)
+                                    .bg(self.theme.yellow),
+                            ),
+                            Span::styled(
+                                ": ",
+                                Style::default()
+                                    .fg(self.theme.base)
+                                    .bg(self.theme.yellow),
+                            ),
+                            Span::styled(
+                                &field.value,
+                                Style::default()
+                                    .fg(self.theme.base)
+                                    .bg(self.theme.yellow),
+                            ),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", Style::default()),
+                            Span::styled(&field.name, Style::default().fg(self.theme.subtext1)),
+                            Span::styled(": ", Style::default().fg(self.theme.overlay0)),
+                            Span::styled(&field.value, Style::default().fg(self.theme.text)),
+                        ]));
+                    }
                 }
             }
         }

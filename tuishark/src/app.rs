@@ -6,6 +6,7 @@ use crate::capture::file::load_pcap;
 use crate::capture::live::{list_interfaces, InterfaceInfo, LiveCapture};
 use crate::dissect::fast::dissect_detail;
 use crate::dissect::model::PacketDetail;
+use crate::dissect::worker::{DissectRequest, DissectWorker};
 use crate::event::{Event, EventHandler};
 use crate::store::packet_store::PacketStore;
 use crate::tui::Tui;
@@ -57,6 +58,16 @@ pub enum CaptureState {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DissectState {
+    /// Only fast (etherparse) dissection available.
+    Fast,
+    /// Deep dissection requested, waiting for tshark result.
+    DeepPending,
+    /// Deep dissection result received and displayed.
+    Deep,
+}
+
 pub struct App {
     running: bool,
     store: PacketStore,
@@ -68,6 +79,8 @@ pub struct App {
     detail: Option<PacketDetail>,
     expanded_layers: Vec<bool>,
     selected_layer: Option<usize>,
+    selected_field: Option<usize>,
+    highlight_range: Option<(usize, usize)>,
     file_path: Option<PathBuf>,
     // Live capture state
     interface_name: Option<String>,
@@ -81,10 +94,19 @@ pub struct App {
     picker_scroll_offset: usize,
     // Status/error message
     status_message: Option<String>,
+    // Deep dissection
+    dissect_worker: Option<DissectWorker>,
+    dissect_state: DissectState,
 }
 
 impl App {
-    pub fn new(file: Option<PathBuf>, interface: Option<String>) -> Self {
+    pub fn new(file: Option<PathBuf>, interface: Option<String>, enable_deep: bool) -> Self {
+        let dissect_worker = if enable_deep {
+            DissectWorker::spawn()
+        } else {
+            None
+        };
+
         Self {
             running: true,
             store: PacketStore::default(),
@@ -96,6 +118,8 @@ impl App {
             detail: None,
             expanded_layers: Vec::new(),
             selected_layer: None,
+            selected_field: None,
+            highlight_range: None,
             file_path: file,
             interface_name: interface,
             capture_state: CaptureState::Idle,
@@ -106,6 +130,8 @@ impl App {
             picker_selected: 0,
             picker_scroll_offset: 0,
             status_message: None,
+            dissect_worker,
+            dissect_state: DissectState::Fast,
         }
     }
 
@@ -133,6 +159,9 @@ impl App {
         while self.running {
             // Drain incoming packets from live capture
             self.drain_capture_packets();
+
+            // Check for deep dissection results
+            self.drain_deep_results();
 
             terminal.draw(|frame| self.render(frame))?;
 
@@ -204,6 +233,68 @@ impl App {
                 if let Some(err) = cap.error() {
                     self.status_message = Some(err);
                 }
+            }
+        }
+    }
+
+    fn drain_deep_results(&mut self) {
+        // Collect results first to avoid borrow conflict
+        let results: Vec<_> = self
+            .dissect_worker
+            .as_ref()
+            .map(|w| {
+                let mut v = Vec::new();
+                while let Some(r) = w.try_recv() {
+                    v.push(r);
+                }
+                v
+            })
+            .unwrap_or_default();
+
+        for result in results {
+            if self.selected_packet == Some(result.index) {
+                if let Some(detail) = result.detail {
+                    let layer_count = detail.layers.len();
+                    self.detail = Some(detail);
+                    self.expanded_layers = vec![true; layer_count];
+                    self.selected_layer = if layer_count > 0 { Some(0) } else { None };
+                    self.selected_field = None;
+                    self.dissect_state = DissectState::Deep;
+                    self.update_highlight();
+                }
+            }
+        }
+    }
+
+    fn update_highlight(&mut self) {
+        self.highlight_range = None;
+        let Some(ref detail) = self.detail else {
+            return;
+        };
+        let Some(layer_idx) = self.selected_layer else {
+            return;
+        };
+        let Some(layer) = detail.layers.get(layer_idx) else {
+            return;
+        };
+
+        if let Some(field_idx) = self.selected_field {
+            // Specific field selected — highlight that field's bytes
+            if let Some(field) = layer.fields.get(field_idx) {
+                self.highlight_range = field.byte_range;
+            }
+        } else {
+            // Layer selected — highlight the union of all field byte ranges
+            let mut start = usize::MAX;
+            let mut end = 0usize;
+            for field in &layer.fields {
+                if let Some((s, e)) = field.byte_range {
+                    start = start.min(s);
+                    end = end.max(e);
+                }
+            }
+            if start < end {
+                self.highlight_range = Some((start, end));
             }
         }
     }
@@ -292,6 +383,7 @@ impl App {
             self.detail.as_ref(),
             &self.expanded_layers,
             self.selected_layer,
+            self.selected_field,
             &self.theme,
             self.active_pane == Pane::DetailTree,
         );
@@ -301,7 +393,12 @@ impl App {
         let hex_data = self
             .selected_packet
             .and_then(|idx| self.store.get_raw(idx));
-        let hex_view = HexView::new(hex_data, &self.theme, self.active_pane == Pane::HexView);
+        let hex_view = HexView::new(
+            hex_data,
+            self.highlight_range,
+            &self.theme,
+            self.active_pane == Pane::HexView,
+        );
         frame.render_widget(hex_view, layout.bottom_left);
 
         // Kernel trace placeholder (Phase 6)
@@ -321,6 +418,7 @@ impl App {
             self.store.len(),
             self.selected_packet,
             self.capture_state,
+            self.dissect_state,
             self.status_message.as_deref(),
             &self.theme,
         );
@@ -528,25 +626,76 @@ impl App {
 
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.selected_layer = Some(
-                    self.selected_layer
-                        .map(|i| (i + 1).min(layer_count - 1))
-                        .unwrap_or(0),
-                );
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.selected_layer = Some(
-                    self.selected_layer
-                        .map(|i| i.saturating_sub(1))
-                        .unwrap_or(0),
-                );
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(idx) = self.selected_layer {
-                    if idx < self.expanded_layers.len() {
-                        self.expanded_layers[idx] = !self.expanded_layers[idx];
+                if let Some(field_idx) = self.selected_field {
+                    // Navigate within expanded layer fields
+                    let layer_idx = self.selected_layer.unwrap_or(0);
+                    let field_count = detail.layers.get(layer_idx).map(|l| l.fields.len()).unwrap_or(0);
+                    if field_idx + 1 < field_count {
+                        self.selected_field = Some(field_idx + 1);
+                    } else {
+                        // Move to next layer
+                        self.selected_field = None;
+                        self.selected_layer = Some(
+                            self.selected_layer
+                                .map(|i| (i + 1).min(layer_count - 1))
+                                .unwrap_or(0),
+                        );
+                    }
+                } else {
+                    // At layer level — if expanded, enter fields; else next layer
+                    let layer_idx = self.selected_layer.unwrap_or(0);
+                    let is_expanded = self.expanded_layers.get(layer_idx).copied().unwrap_or(false);
+                    let has_fields = detail.layers.get(layer_idx).map(|l| !l.fields.is_empty()).unwrap_or(false);
+                    if is_expanded && has_fields {
+                        self.selected_field = Some(0);
+                    } else {
+                        self.selected_layer = Some(
+                            self.selected_layer
+                                .map(|i| (i + 1).min(layer_count - 1))
+                                .unwrap_or(0),
+                        );
                     }
                 }
+                self.update_highlight();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(field_idx) = self.selected_field {
+                    if field_idx > 0 {
+                        self.selected_field = Some(field_idx - 1);
+                    } else {
+                        // Back to layer header
+                        self.selected_field = None;
+                    }
+                } else {
+                    // At layer level — go to previous layer's last field if expanded
+                    let prev_layer = self.selected_layer.map(|i| i.saturating_sub(1)).unwrap_or(0);
+                    if prev_layer != self.selected_layer.unwrap_or(0) {
+                        let is_expanded = self.expanded_layers.get(prev_layer).copied().unwrap_or(false);
+                        let field_count = detail.layers.get(prev_layer).map(|l| l.fields.len()).unwrap_or(0);
+                        if is_expanded && field_count > 0 {
+                            self.selected_layer = Some(prev_layer);
+                            self.selected_field = Some(field_count - 1);
+                        } else {
+                            self.selected_layer = Some(prev_layer);
+                            self.selected_field = None;
+                        }
+                    }
+                }
+                self.update_highlight();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.selected_field.is_none() {
+                    if let Some(idx) = self.selected_layer {
+                        if idx < self.expanded_layers.len() {
+                            self.expanded_layers[idx] = !self.expanded_layers[idx];
+                            // Clear field selection when collapsing
+                            if !self.expanded_layers[idx] {
+                                self.selected_field = None;
+                            }
+                        }
+                    }
+                }
+                self.update_highlight();
             }
             _ => {}
         }
@@ -555,13 +704,30 @@ impl App {
     fn select_packet(&mut self, index: usize) {
         self.selected_packet = Some(index);
 
-        // Dissect packet detail
-        if let Some(raw) = self.store.get_raw(index) {
+        // Clone raw data to avoid borrow conflict with &mut self
+        let raw_owned = self.store.get_raw(index).map(|r| r.to_vec());
+        let timestamp = self.store.get(index).map(|s| s.timestamp).unwrap_or(0.0);
+
+        if let Some(ref raw) = raw_owned {
+            // Fast dissection (immediate)
             let detail = dissect_detail(raw);
             let layer_count = detail.layers.len();
             self.detail = Some(detail);
             self.expanded_layers = vec![true; layer_count];
             self.selected_layer = if layer_count > 0 { Some(0) } else { None };
+            self.selected_field = None;
+            self.dissect_state = DissectState::Fast;
+            self.update_highlight();
+
+            // Queue deep dissection if worker is available
+            if let Some(ref worker) = self.dissect_worker {
+                worker.request(DissectRequest {
+                    index,
+                    raw: raw.clone(),
+                    timestamp,
+                });
+                self.dissect_state = DissectState::DeepPending;
+            }
         }
 
         // Adjust scroll offset to keep selected packet visible
@@ -593,14 +759,14 @@ mod tests {
 
     #[test]
     fn capture_state_default() {
-        let app = App::new(None, None);
+        let app = App::new(None, None, false);
         assert_eq!(app.capture_state, CaptureState::Idle);
         assert!(app.auto_scroll);
     }
 
     #[test]
     fn picker_scroll_adjusts() {
-        let mut app = App::new(None, None);
+        let mut app = App::new(None, None, false);
         app.picker_selected = 25;
         app.adjust_picker_scroll();
         assert!(app.picker_scroll_offset > 0);

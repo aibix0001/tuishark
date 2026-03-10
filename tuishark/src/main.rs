@@ -29,6 +29,10 @@ struct Cli {
     /// List available network interfaces and exit
     #[arg(long = "list-interfaces")]
     list_interfaces: bool,
+
+    /// Disable deep dissection (tshark), use etherparse-only mode
+    #[arg(long = "no-deep")]
+    no_deep: bool,
 }
 
 fn main() -> Result<()> {
@@ -54,8 +58,17 @@ fn main() -> Result<()> {
         original_hook(info);
     }));
 
+    let enable_deep = if cli.no_deep {
+        false
+    } else if dissect::deep::tshark_available() {
+        true
+    } else {
+        eprintln!("Note: tshark not found — deep dissection unavailable. Install tshark for full protocol analysis.");
+        false
+    };
+
     let mut terminal = tui::init()?;
-    let result = app::App::new(cli.file, cli.interface).run(&mut terminal);
+    let result = app::App::new(cli.file, cli.interface, enable_deep).run(&mut terminal);
     tui::restore()?;
 
     result

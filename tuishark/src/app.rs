@@ -4,14 +4,19 @@ use std::path::PathBuf;
 
 use crate::capture::file::load_pcap;
 use crate::capture::live::{list_interfaces, InterfaceInfo, LiveCapture};
+use crate::capture::save::save_pcap;
+use crate::dissect::deep::next_request_seq;
 use crate::dissect::fast::dissect_detail;
 use crate::dissect::model::PacketDetail;
-use crate::dissect::deep::next_request_seq;
 use crate::dissect::worker::{DissectRequest, DissectWorker};
 use crate::event::{Event, EventHandler};
+use crate::session::recent::RecentFiles;
 use crate::store::packet_store::PacketStore;
 use crate::tui::Tui;
 use crate::ui::dialogs::interface_picker::InterfacePicker;
+use crate::ui::dialogs::open_dialog::{OpenDialog, OpenDialogMode};
+use crate::ui::dialogs::quit_confirm::QuitConfirm;
+use crate::ui::dialogs::save_dialog::SaveDialog;
 use crate::ui::layout::AppLayout;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::detail_tree::DetailTree;
@@ -99,6 +104,21 @@ pub struct App {
     dissect_worker: Option<DissectWorker>,
     dissect_state: DissectState,
     dissect_seq: usize,
+    // Session management (Phase 4)
+    show_save_dialog: bool,
+    save_filename: String,
+    save_cursor_pos: usize,
+    show_open_dialog: bool,
+    open_input: String,
+    open_cursor_pos: usize,
+    open_mode: OpenDialogMode,
+    open_selected_recent: usize,
+    open_scroll_offset: usize,
+    recent_files: RecentFiles,
+    show_quit_confirm: bool,
+    quit_after_save: bool,
+    last_save_path: Option<PathBuf>,
+    enable_deep: bool,
 }
 
 impl App {
@@ -141,19 +161,29 @@ impl App {
             dissect_worker,
             dissect_state: DissectState::Fast,
             dissect_seq: 0,
+            // Session management
+            show_save_dialog: false,
+            save_filename: String::new(),
+            save_cursor_pos: 0,
+            show_open_dialog: false,
+            open_input: String::new(),
+            open_cursor_pos: 0,
+            open_mode: OpenDialogMode::RecentList,
+            open_selected_recent: 0,
+            open_scroll_offset: 0,
+            recent_files: RecentFiles::load(),
+            show_quit_confirm: false,
+            quit_after_save: false,
+            last_save_path: None,
+            enable_deep,
         }
     }
 
     pub fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         // Load file if provided
         if let Some(path) = &self.file_path {
-            let packets = load_pcap(path)?;
-            for (pkt, raw) in packets {
-                self.store.add(pkt, raw);
-            }
-            if !self.store.is_empty() {
-                self.select_packet(0);
-            }
+            let path = path.clone();
+            self.do_open_file(&path)?;
         } else if let Some(iface) = &self.interface_name {
             // Start live capture on specified interface
             let iface = iface.clone();
@@ -212,6 +242,11 @@ impl App {
         let Some(ref capture) = self.live_capture else {
             return;
         };
+
+        // Propagate first absolute timestamp from capture thread
+        if let Some(ts) = capture.first_absolute_ts() {
+            self.store.set_first_absolute_ts(ts);
+        }
 
         let mut new_packets = false;
         // Drain up to 1000 packets per tick to avoid blocking the UI
@@ -447,8 +482,29 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Interface picker overlay
-        if self.show_interface_picker {
+        // Dialog overlays (priority order: quit > save > open > picker)
+        if self.show_quit_confirm {
+            let dialog = QuitConfirm::new(&self.theme);
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_save_dialog {
+            let dialog = SaveDialog::new(
+                &self.save_filename,
+                self.save_cursor_pos,
+                &self.theme,
+            );
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_open_dialog {
+            let dialog = OpenDialog::new(
+                &self.open_input,
+                self.open_cursor_pos,
+                &self.recent_files.files,
+                self.open_selected_recent,
+                self.open_scroll_offset,
+                self.open_mode,
+                &self.theme,
+            );
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_interface_picker {
             let picker = InterfacePicker::new(
                 &self.available_interfaces,
                 self.picker_selected,
@@ -463,7 +519,19 @@ impl App {
         // Clear status message on any key press
         self.status_message = None;
 
-        // Interface picker mode
+        // Dialog mode routing (highest priority first)
+        if self.show_quit_confirm {
+            self.handle_quit_confirm_key(key);
+            return;
+        }
+        if self.show_save_dialog {
+            self.handle_save_dialog_key(key);
+            return;
+        }
+        if self.show_open_dialog {
+            self.handle_open_dialog_key(key);
+            return;
+        }
         if self.show_interface_picker {
             self.handle_picker_key(key);
             return;
@@ -471,8 +539,13 @@ impl App {
 
         // Global shortcuts
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                // Ctrl+C always force-quits immediately
                 self.running = false;
+                return;
+            }
+            (_, KeyCode::Char('q')) => {
+                self.try_quit();
                 return;
             }
             (_, KeyCode::Tab) => {
@@ -493,6 +566,19 @@ impl App {
             }
             (_, KeyCode::Char('3')) => {
                 self.active_pane = Pane::HexView;
+                return;
+            }
+            // Session management shortcuts
+            (_, KeyCode::Char('s')) => {
+                self.open_save_dialog();
+                return;
+            }
+            (_, KeyCode::Char('w')) => {
+                self.quick_save();
+                return;
+            }
+            (_, KeyCode::Char('o')) => {
+                self.open_open_dialog();
                 return;
             }
             // Live capture controls
@@ -765,6 +851,371 @@ impl App {
             self.scroll_offset = index - self.visible_rows + 1;
         }
     }
+
+    // --- Session management methods ---
+
+    fn try_quit(&mut self) {
+        if self.store.is_modified() {
+            self.show_quit_confirm = true;
+        } else {
+            self.running = false;
+        }
+    }
+
+    fn default_save_filename() -> String {
+        let now = std::time::SystemTime::now();
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Simple timestamp-based filename (avoid chrono dependency)
+        // Format: capture_EPOCH.pcap
+        let hours = (secs % 86400) / 3600;
+        let minutes = (secs % 3600) / 60;
+        let seconds = secs % 60;
+        // Days since epoch for a rough date
+        let days = secs / 86400;
+        // Approximate date calculation (good enough for filenames)
+        let (year, month, day) = epoch_days_to_date(days);
+        format!(
+            "capture_{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}.pcap"
+        )
+    }
+
+    fn open_save_dialog(&mut self) {
+        if self.store.is_empty() {
+            self.status_message = Some("No packets to save".into());
+            return;
+        }
+        self.save_filename = if let Some(ref path) = self.last_save_path {
+            path.display().to_string()
+        } else {
+            Self::default_save_filename()
+        };
+        self.save_cursor_pos = self.save_filename.chars().count();
+        self.show_save_dialog = true;
+    }
+
+    fn quick_save(&mut self) {
+        if self.store.is_empty() {
+            self.status_message = Some("No packets to save".into());
+            return;
+        }
+        if let Some(path) = self.last_save_path.clone() {
+            self.do_save(&path);
+        } else {
+            self.open_save_dialog();
+        }
+    }
+
+    fn do_save(&mut self, path: &std::path::Path) {
+        match save_pcap(path, &self.store) {
+            Ok(count) => {
+                self.store.mark_saved();
+                self.last_save_path = Some(path.to_path_buf());
+                self.recent_files.add(path);
+                self.recent_files.save();
+                self.status_message = Some(format!("Saved {count} packets to {}", path.display()));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Save failed: {e:#}"));
+            }
+        }
+    }
+
+    fn open_open_dialog(&mut self) {
+        self.recent_files = RecentFiles::load(); // refresh
+        self.open_input.clear();
+        self.open_cursor_pos = 0;
+        self.open_selected_recent = 0;
+        self.open_scroll_offset = 0;
+        self.open_mode = if self.recent_files.files.is_empty() {
+            OpenDialogMode::TextInput
+        } else {
+            OpenDialogMode::RecentList
+        };
+        self.show_open_dialog = true;
+    }
+
+    fn do_open_file(&mut self, path: &std::path::Path) -> Result<()> {
+        // Stop any active capture
+        if self.capture_state == CaptureState::Capturing {
+            self.stop_capture();
+        }
+
+        let (packets, first_ts) = load_pcap(path)?;
+
+        // Reset state
+        self.store.clear();
+        self.selected_packet = None;
+        self.scroll_offset = 0;
+        self.detail = None;
+        self.expanded_layers.clear();
+        self.selected_layer = None;
+        self.selected_field = None;
+        self.highlight_range = None;
+        self.dissect_state = DissectState::Fast;
+        self.capture_state = CaptureState::Idle;
+        self.interface_name = None;
+        self.live_capture = None;
+
+        // Restart deep dissection worker if needed
+        if self.enable_deep && self.dissect_worker.is_none() {
+            if let Ok(w) = DissectWorker::try_spawn() {
+                self.dissect_worker = Some(w);
+            }
+        }
+
+        if let Some(ts) = first_ts {
+            self.store.set_first_absolute_ts(ts);
+        }
+
+        for (pkt, raw) in packets {
+            self.store.add(pkt, raw);
+        }
+
+        // Mark as not modified (just loaded from file)
+        self.store.mark_saved();
+
+        self.file_path = Some(path.to_path_buf());
+
+        // Update recent files
+        self.recent_files.add(path);
+        self.recent_files.save();
+
+        if !self.store.is_empty() {
+            self.select_packet(0);
+        }
+
+        Ok(())
+    }
+
+    fn handle_save_dialog_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos);
+                self.save_filename.insert(byte_idx, c);
+                self.save_cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if self.save_cursor_pos > 0 {
+                    let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos - 1);
+                    self.save_filename.remove(byte_idx);
+                    self.save_cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = self.save_filename.chars().count();
+                if self.save_cursor_pos < char_count {
+                    let byte_idx = char_to_byte_index(&self.save_filename, self.save_cursor_pos);
+                    self.save_filename.remove(byte_idx);
+                }
+            }
+            KeyCode::Left => {
+                self.save_cursor_pos = self.save_cursor_pos.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_count = self.save_filename.chars().count();
+                self.save_cursor_pos = (self.save_cursor_pos + 1).min(char_count);
+            }
+            KeyCode::Home => {
+                self.save_cursor_pos = 0;
+            }
+            KeyCode::End => {
+                self.save_cursor_pos = self.save_filename.chars().count();
+            }
+            KeyCode::Enter => {
+                let filename = self.save_filename.trim().to_string();
+                self.show_save_dialog = false;
+                if !filename.is_empty() {
+                    let path = PathBuf::from(&filename);
+                    self.do_save(&path);
+                    if self.quit_after_save {
+                        self.quit_after_save = false;
+                        self.running = false;
+                    }
+                } else {
+                    self.quit_after_save = false;
+                }
+            }
+            KeyCode::Esc => {
+                self.show_save_dialog = false;
+                self.quit_after_save = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_open_dialog_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab => {
+                if !self.recent_files.files.is_empty() {
+                    self.open_mode = match self.open_mode {
+                        OpenDialogMode::TextInput => OpenDialogMode::RecentList,
+                        OpenDialogMode::RecentList => OpenDialogMode::TextInput,
+                    };
+                }
+            }
+            KeyCode::Esc => {
+                self.show_open_dialog = false;
+            }
+            KeyCode::Enter => {
+                let path = match self.open_mode {
+                    OpenDialogMode::TextInput => {
+                        if self.open_input.is_empty() {
+                            return;
+                        }
+                        PathBuf::from(&self.open_input)
+                    }
+                    OpenDialogMode::RecentList => {
+                        if let Some(entry) = self.recent_files.files.get(self.open_selected_recent) {
+                            entry.path.clone()
+                        } else {
+                            return;
+                        }
+                    }
+                };
+                self.show_open_dialog = false;
+                // Warn about unsaved data (lost on open)
+                if self.store.is_modified() {
+                    self.status_message = Some(
+                        "Warning: unsaved packets discarded".into(),
+                    );
+                }
+                if let Err(e) = self.do_open_file(&path) {
+                    self.status_message = Some(format!("Open failed: {e:#}"));
+                }
+            }
+            _ => match self.open_mode {
+                OpenDialogMode::TextInput => self.handle_open_text_input(key),
+                OpenDialogMode::RecentList => self.handle_open_recent_list(key),
+            },
+        }
+    }
+
+    fn handle_open_text_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos);
+                self.open_input.insert(byte_idx, c);
+                self.open_cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if self.open_cursor_pos > 0 {
+                    let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos - 1);
+                    self.open_input.remove(byte_idx);
+                    self.open_cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = self.open_input.chars().count();
+                if self.open_cursor_pos < char_count {
+                    let byte_idx = char_to_byte_index(&self.open_input, self.open_cursor_pos);
+                    self.open_input.remove(byte_idx);
+                }
+            }
+            KeyCode::Left => {
+                self.open_cursor_pos = self.open_cursor_pos.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_count = self.open_input.chars().count();
+                self.open_cursor_pos = (self.open_cursor_pos + 1).min(char_count);
+            }
+            KeyCode::Home => {
+                self.open_cursor_pos = 0;
+            }
+            KeyCode::End => {
+                self.open_cursor_pos = self.open_input.chars().count();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_open_recent_list(&mut self, key: KeyEvent) {
+        if self.recent_files.files.is_empty() {
+            return;
+        }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.open_selected_recent =
+                    (self.open_selected_recent + 1).min(self.recent_files.files.len() - 1);
+                self.adjust_open_scroll();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.open_selected_recent = self.open_selected_recent.saturating_sub(1);
+                self.adjust_open_scroll();
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.open_selected_recent = 0;
+                self.open_scroll_offset = 0;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.open_selected_recent = self.recent_files.files.len() - 1;
+                self.adjust_open_scroll();
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_open_scroll(&mut self) {
+        let visible = 8usize; // conservative
+        if self.open_selected_recent < self.open_scroll_offset {
+            self.open_scroll_offset = self.open_selected_recent;
+        } else if self.open_selected_recent >= self.open_scroll_offset + visible {
+            self.open_scroll_offset = self.open_selected_recent.saturating_sub(visible - 1);
+        }
+    }
+
+    fn handle_quit_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.show_quit_confirm = false;
+                // Save then quit
+                if let Some(path) = self.last_save_path.clone() {
+                    self.do_save(&path);
+                    self.running = false;
+                } else {
+                    // Open save dialog; quit automatically after save completes
+                    self.quit_after_save = true;
+                    self.open_save_dialog();
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.show_quit_confirm = false;
+                self.running = false;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                self.show_quit_confirm = false;
+                self.quit_after_save = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Convert a char-based cursor position to a byte index in a string.
+/// Panics if `char_pos` > number of chars (callers must clamp).
+fn char_to_byte_index(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
+    // Civil days algorithm (simplified)
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
 }
 
 #[cfg(test)]
@@ -799,5 +1250,29 @@ mod tests {
         app.adjust_picker_scroll();
         assert!(app.picker_scroll_offset > 0);
         assert!(app.picker_selected >= app.picker_scroll_offset);
+    }
+
+    #[test]
+    fn default_save_filename_format() {
+        let name = App::default_save_filename();
+        assert!(name.starts_with("capture_"));
+        assert!(name.ends_with(".pcap"));
+        assert!(name.len() > 20); // capture_YYYYMMDD_HHMMSS.pcap
+    }
+
+    #[test]
+    fn try_quit_with_empty_store() {
+        let mut app = App::new(None, None, false);
+        app.try_quit();
+        assert!(!app.running); // Should quit immediately
+    }
+
+    #[test]
+    fn epoch_date_known_value() {
+        // 2024-01-01 is day 19723
+        let (y, m, d) = epoch_days_to_date(19723);
+        assert_eq!(y, 2024);
+        assert_eq!(m, 1);
+        assert_eq!(d, 1);
     }
 }

@@ -1,15 +1,28 @@
 use crate::dissect::model::PacketSummary;
 
-#[derive(Default)]
 pub struct PacketStore {
     packets: Vec<PacketSummary>,
     raw_data: Vec<Vec<u8>>,
+    first_absolute_ts: Option<f64>,
+    modified_since_save: bool,
+}
+
+impl Default for PacketStore {
+    fn default() -> Self {
+        Self {
+            packets: Vec::new(),
+            raw_data: Vec::new(),
+            first_absolute_ts: None,
+            modified_since_save: false,
+        }
+    }
 }
 
 impl PacketStore {
     pub fn add(&mut self, packet: PacketSummary, raw: Vec<u8>) {
         self.packets.push(packet);
         self.raw_data.push(raw);
+        self.modified_since_save = true;
     }
 
     pub fn len(&self) -> usize {
@@ -33,6 +46,31 @@ impl PacketStore {
         let end = (offset + count).min(self.packets.len());
         &self.packets[start..end]
     }
+
+    pub fn set_first_absolute_ts(&mut self, ts: f64) {
+        if self.first_absolute_ts.is_none() {
+            self.first_absolute_ts = Some(ts);
+        }
+    }
+
+    pub fn first_absolute_ts(&self) -> Option<f64> {
+        self.first_absolute_ts
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.modified_since_save && !self.packets.is_empty()
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.modified_since_save = false;
+    }
+
+    pub fn clear(&mut self) {
+        self.packets.clear();
+        self.raw_data.clear();
+        self.first_absolute_ts = None;
+        self.modified_since_save = false;
+    }
 }
 
 #[cfg(test)]
@@ -49,6 +87,7 @@ mod tests {
             destination: "10.0.0.2".into(),
             protocol: Protocol::Tcp,
             length: 64,
+            original_length: 64,
             info: "test".into(),
         };
         (summary, raw)
@@ -98,5 +137,49 @@ mod tests {
         // Zero count
         let range = store.get_range(0, 0);
         assert_eq!(range.len(), 0);
+    }
+
+    #[test]
+    fn modified_tracking() {
+        let mut store = PacketStore::default();
+        assert!(!store.is_modified());
+
+        let (pkt, raw) = make_summary(0);
+        store.add(pkt, raw);
+        assert!(store.is_modified());
+
+        store.mark_saved();
+        assert!(!store.is_modified());
+
+        let (pkt, raw) = make_summary(1);
+        store.add(pkt, raw);
+        assert!(store.is_modified());
+    }
+
+    #[test]
+    fn absolute_timestamp() {
+        let mut store = PacketStore::default();
+        assert!(store.first_absolute_ts().is_none());
+
+        store.set_first_absolute_ts(1710000000.0);
+        assert_eq!(store.first_absolute_ts(), Some(1710000000.0));
+
+        // Should not overwrite once set
+        store.set_first_absolute_ts(9999.0);
+        assert_eq!(store.first_absolute_ts(), Some(1710000000.0));
+    }
+
+    #[test]
+    fn clear_resets_everything() {
+        let mut store = PacketStore::default();
+        store.set_first_absolute_ts(1710000000.0);
+        let (pkt, raw) = make_summary(0);
+        store.add(pkt, raw);
+        assert!(store.is_modified());
+
+        store.clear();
+        assert!(store.is_empty());
+        assert!(!store.is_modified());
+        assert!(store.first_absolute_ts().is_none());
     }
 }

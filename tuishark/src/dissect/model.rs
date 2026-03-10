@@ -8,6 +8,8 @@ pub struct PacketSummary {
     pub destination: String,
     pub protocol: Protocol,
     pub length: usize,
+    /// Original wire length (may differ from `length` if packet was truncated by snaplen).
+    pub original_length: usize,
     pub info: String,
 }
 

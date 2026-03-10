@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4"]
+related_issues: ["#1", "#2", "#3", "#4", "#7"]
 related_mrs: ["!2", "!4"]
 ---
 
@@ -50,10 +50,13 @@ cargo build --release
 | `Tab` / `Shift+Tab` | Cycle panes forward / backward |
 | `1` / `2` / `3` | Focus packet table / detail tree / hex view |
 | `Enter` or `Space` | Expand/collapse protocol layer |
+| `s` | Open save dialog |
+| `w` | Quick save (reuse last path) |
+| `o` | Open file / recent files dialog |
 | `c` | Open interface picker (when not capturing) |
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
-| `q` or `Ctrl+C` | Quit |
+| `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
 
 ## Configuration
 
@@ -110,6 +113,13 @@ Live capture runs a background thread that sniffs packets via libpcap and stream
 
 Deep dissection runs a `DeepDissector` in a dedicated worker thread. When a packet is selected, the fast (etherparse) result is shown immediately while a deep dissection request is queued. The worker writes the raw packet to a named FIFO (with pcap headers), tshark reads and dissects it, and rtshark parses the PDML output into structured layers. The result is sent back via an `mpsc` channel and replaces the fast detail on the next UI tick. The status bar shows `DISSECTING...` while pending and `DEEP` when the deep result is displayed.
 
+### Session management (Phase 4)
+
+Save and open pcap files from within the TUI. Press `s` to save captured packets (with a text-input dialog for the filename), `w` to quick-save to the last used path, or `o` to open a file from the recent files list or by typing a path. When quitting with unsaved live capture data, a confirmation dialog offers to save, discard, or cancel.
+
+Recent files (last 10) are tracked in `~/.config/tuishark/recent.json` and persist across sessions.
+
 ## Changelog
 
+- 2026-03-10: Phase 4 — session management: save/open pcap files, recent files, quit confirmation
 - 2026-03-10: Phase 3 — added deep dissection via tshark, hex byte highlighting, field-level selection

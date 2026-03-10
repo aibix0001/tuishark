@@ -1,0 +1,19 @@
+[package]
+name = "tuishark"
+version = "0.1.0"
+edition = "2024"
+description = "Modern console-based packet analyzer"
+
+[[bin]]
+name = "tuishark"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+catppuccin = { version = "2", features = ["ratatui"] }
+pcap = "2"
+etherparse = "0.16"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

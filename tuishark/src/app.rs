@@ -24,14 +24,19 @@ use crate::ui::widgets::hex_view::HexView;
 use crate::ui::widgets::packet_table::PacketTable;
 use crate::ui::widgets::filter_bar::FilterBar;
 use crate::ui::widgets::status_bar::StatusBar;
+use crate::ui::widgets::trace_view::TraceView;
 use crate::filter::ast::Expr;
 use crate::filter::eval;
 use crate::filter::parser;
+use crate::trace::engine::TraceEngine;
+use crate::trace::lookup::flow_key_from_summary;
+use crate::trace::model::TraceState;
+use crate::trace::store::TraceStore;
 
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -41,6 +46,7 @@ pub enum Pane {
     PacketTable,
     DetailTree,
     HexView,
+    KernelTrace,
 }
 
 impl Pane {
@@ -48,15 +54,17 @@ impl Pane {
         match self {
             Pane::PacketTable => Pane::DetailTree,
             Pane::DetailTree => Pane::HexView,
-            Pane::HexView => Pane::PacketTable,
+            Pane::HexView => Pane::KernelTrace,
+            Pane::KernelTrace => Pane::PacketTable,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Pane::PacketTable => Pane::HexView,
+            Pane::PacketTable => Pane::KernelTrace,
             Pane::DetailTree => Pane::PacketTable,
             Pane::HexView => Pane::DetailTree,
+            Pane::KernelTrace => Pane::HexView,
         }
     }
 }
@@ -131,10 +139,19 @@ pub struct App {
     active_filter_text: String,
     filter_error: bool,
     filtered_indices: Option<Vec<usize>>,
+    // eBPF kernel tracing (Phase 6)
+    trace_engine: Option<TraceEngine>,
+    trace_store: TraceStore,
+    trace_state: TraceState,
 }
 
 impl App {
-    pub fn new(file: Option<PathBuf>, interface: Option<String>, enable_deep: bool) -> Self {
+    pub fn new(
+        file: Option<PathBuf>,
+        interface: Option<String>,
+        enable_deep: bool,
+        enable_trace: bool,
+    ) -> Self {
         let dissect_worker = if enable_deep {
             match DissectWorker::try_spawn() {
                 Ok(w) => Some(w),
@@ -145,6 +162,21 @@ impl App {
             }
         } else {
             None
+        };
+
+        // Determine trace state and try to load eBPF engine
+        let is_file_mode = file.is_some();
+        let (trace_engine, trace_state, trace_msg) = if is_file_mode {
+            (None, TraceState::FileMode, None)
+        } else if !enable_trace {
+            (None, TraceState::Disabled, None)
+        } else {
+            match TraceEngine::new() {
+                Ok(engine) => (Some(engine), TraceState::Active, None),
+                Err(e) => {
+                    (None, TraceState::Unavailable, Some(format!("eBPF tracing unavailable: {e}")))
+                }
+            }
         };
 
         Self {
@@ -169,7 +201,7 @@ impl App {
             available_interfaces: Vec::new(),
             picker_selected: 0,
             picker_scroll_offset: 0,
-            status_message: None,
+            status_message: trace_msg,
             dissect_worker,
             dissect_state: DissectState::Fast,
             dissect_seq: 0,
@@ -196,6 +228,10 @@ impl App {
             active_filter_text: String::new(),
             filter_error: false,
             filtered_indices: None,
+            // eBPF kernel tracing
+            trace_engine,
+            trace_store: TraceStore::default(),
+            trace_state,
         }
     }
 
@@ -245,6 +281,13 @@ impl App {
         self.interface_name = Some(interface.to_string());
         self.auto_scroll = true;
         self.status_message = None;
+        // Restore trace state for live capture
+        if self.trace_engine.is_some() {
+            self.trace_state = TraceState::Active;
+        } else if self.trace_state == TraceState::FileMode {
+            // Was in file mode — restore to Disabled or Unavailable
+            self.trace_state = TraceState::Disabled;
+        }
         Ok(())
     }
 
@@ -279,6 +322,14 @@ impl App {
                         if eval::matches(filter, &summary) {
                             if let Some(ref mut indices) = self.filtered_indices {
                                 indices.push(pkt_index);
+                            }
+                        }
+                    }
+                    // eBPF trace lookup for this packet
+                    if let Some(ref mut engine) = self.trace_engine {
+                        if let Some(flow_key) = flow_key_from_summary(&summary) {
+                            if let Some(info) = engine.lookup(&flow_key) {
+                                self.trace_store.insert(pkt_index, info);
                             }
                         }
                     }
@@ -508,17 +559,17 @@ impl App {
         );
         frame.render_widget(hex_view, layout.bottom_left);
 
-        // Kernel trace placeholder (Phase 6)
-        let trace_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.surface2))
-            .title(" Kernel Trace ")
-            .title_style(Style::default().fg(self.theme.text))
-            .style(Style::default().bg(self.theme.base));
-        let trace_placeholder = Paragraph::new("Kernel tracing not yet available")
-            .style(Style::default().fg(self.theme.subtext0))
-            .block(trace_block);
-        frame.render_widget(trace_placeholder, layout.bottom_right);
+        // Kernel trace (Phase 6)
+        let trace_info = self
+            .selected_packet
+            .and_then(|idx| self.trace_store.get(idx));
+        let trace_view = TraceView::new(
+            trace_info,
+            self.trace_state,
+            &self.theme,
+            self.active_pane == Pane::KernelTrace,
+        );
+        frame.render_widget(trace_view, layout.bottom_right);
 
         // Status bar
         let filter_match = self.filtered_indices.as_ref().map(|fi| (fi.len(), self.store.len()));
@@ -623,6 +674,10 @@ impl App {
                 self.active_pane = Pane::HexView;
                 return;
             }
+            (_, KeyCode::Char('4')) => {
+                self.active_pane = Pane::KernelTrace;
+                return;
+            }
             // Session management shortcuts
             (_, KeyCode::Char('s')) => {
                 self.open_save_dialog();
@@ -663,6 +718,7 @@ impl App {
             Pane::PacketTable => self.handle_packet_table_key(key),
             Pane::DetailTree => self.handle_detail_tree_key(key),
             Pane::HexView => {}
+            Pane::KernelTrace => {}
         }
     }
 
@@ -1007,6 +1063,9 @@ impl App {
         self.interface_name = None;
         self.live_capture = None;
         self.clear_filter();
+        self.trace_store.clear();
+        self.trace_state = TraceState::FileMode;
+        // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
 
         // Restart deep dissection worker if needed
         if self.enable_deep && self.dissect_worker.is_none() {
@@ -1439,26 +1498,28 @@ mod tests {
     fn pane_next_cycles() {
         assert_eq!(Pane::PacketTable.next(), Pane::DetailTree);
         assert_eq!(Pane::DetailTree.next(), Pane::HexView);
-        assert_eq!(Pane::HexView.next(), Pane::PacketTable);
+        assert_eq!(Pane::HexView.next(), Pane::KernelTrace);
+        assert_eq!(Pane::KernelTrace.next(), Pane::PacketTable);
     }
 
     #[test]
     fn pane_prev_cycles() {
-        assert_eq!(Pane::PacketTable.prev(), Pane::HexView);
+        assert_eq!(Pane::PacketTable.prev(), Pane::KernelTrace);
         assert_eq!(Pane::DetailTree.prev(), Pane::PacketTable);
         assert_eq!(Pane::HexView.prev(), Pane::DetailTree);
+        assert_eq!(Pane::KernelTrace.prev(), Pane::HexView);
     }
 
     #[test]
     fn capture_state_default() {
-        let app = App::new(None, None, false);
+        let app = App::new(None, None, false, false);
         assert_eq!(app.capture_state, CaptureState::Idle);
         assert!(app.auto_scroll);
     }
 
     #[test]
     fn picker_scroll_adjusts() {
-        let mut app = App::new(None, None, false);
+        let mut app = App::new(None, None, false, false);
         app.picker_selected = 25;
         app.adjust_picker_scroll();
         assert!(app.picker_scroll_offset > 0);
@@ -1475,7 +1536,7 @@ mod tests {
 
     #[test]
     fn try_quit_with_empty_store() {
-        let mut app = App::new(None, None, false);
+        let mut app = App::new(None, None, false, false);
         app.try_quit();
         assert!(!app.running); // Should quit immediately
     }

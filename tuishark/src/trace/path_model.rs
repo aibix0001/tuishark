@@ -23,9 +23,10 @@ pub const FUNC_NAMES: &[&str] = &[
     // UDP rx (11-12)
     "udp_rcv",                     // 11
     "udp_queue_rcv_skb",           // 12
-    // Socket (13-14)
-    "sock_sendmsg",                // 13
-    "sock_recvmsg",                // 14
+    // Socket (13-14) — reserved, not currently probed
+    // (sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff *)
+    "sock_sendmsg",                // 13 (reserved)
+    "sock_recvmsg",                // 14 (reserved)
     // TCP tx (15-16)
     "tcp_sendmsg",                 // 15
     "tcp_write_xmit",             // 16
@@ -72,20 +73,25 @@ impl Subsystem {
 
 /// eBPF PathEvent — must match the kernel-side layout exactly.
 ///
+/// Fields ordered to avoid implicit padding: u64s first, then u32s, then u16s, then u8.
 /// Emitted by each path-tracing kprobe via PerfEventArray.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct PathEvent {
     pub skb_ptr: u64,
     pub timestamp_ns: u64,
-    pub func_id: u16,
     pub src_addr: u32,
     pub dst_addr: u32,
+    pub func_id: u16,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,
-    pub _pad: [u8; 5],
+    pub _pad: [u8; 1],
 }
+
+// Compile-time size assertion to catch layout mismatches between eBPF and userspace.
+// Compile-time size assertion: 8+8+4+4+2+2+2+1+1 = 32 bytes (no implicit padding).
+const _: () = assert!(std::mem::size_of::<PathEvent>() == 32);
 
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for PathEvent {}

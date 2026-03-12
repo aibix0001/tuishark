@@ -50,8 +50,8 @@ impl PathTraceEngine {
         ("path_tcp_data_queue", "tcp_data_queue", 10),
         ("path_udp_rcv", "udp_rcv", 11),
         ("path_udp_queue_rcv_skb", "udp_queue_rcv_skb", 12),
-        ("path_sock_sendmsg", "sock_sendmsg", 13),
-        ("path_sock_recvmsg", "sock_recvmsg", 14),
+        // sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff *; skipped.
+        // func_ids 13-14 reserved for future socket-layer handler.
         ("path_tcp_sendmsg", "tcp_sendmsg", 15),
         ("path_tcp_write_xmit", "tcp_write_xmit", 16),
         ("path_udp_sendmsg", "udp_sendmsg", 17),

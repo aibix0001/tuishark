@@ -29,17 +29,19 @@ struct ProcessInfo {
 
 /// Path event — must match the userspace PathEvent layout exactly.
 /// Emitted by path-tracing kprobes to the PATH_EVENTS perf buffer.
+///
+/// Fields ordered to avoid implicit padding: u64s first, then u32s, then u16s, then u8.
 #[repr(C)]
 struct PathEvent {
     skb_ptr: u64,
     timestamp_ns: u64,
-    func_id: u16,
     src_addr: u32,
     dst_addr: u32,
+    func_id: u16,
     src_port: u16,
     dst_port: u16,
     protocol: u8,
-    _pad: [u8; 5],
+    _pad: [u8; 1],
 }
 
 /// Filter for path tracing — written by userspace to narrow tracing to a specific flow.
@@ -216,6 +218,12 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16) -> Result<(), i64> {
     // Compute IP header pointer
     let iphdr = head.add(net_off as usize);
 
+    // Check IP version nibble — only handle IPv4 (version 4)
+    let version_ihl: u8 = bpf_probe_read_kernel(iphdr as *const u8)?;
+    if (version_ihl >> 4) != 4 {
+        return Ok(());
+    }
+
     // Read IP fields
     let protocol: u8 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_PROTOCOL) as *const u8)?;
     let src_addr: u32 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_SADDR) as *const u32)?;
@@ -262,13 +270,13 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16) -> Result<(), i64> {
     let event = PathEvent {
         skb_ptr: skb as u64,
         timestamp_ns: bpf_ktime_get_ns(),
-        func_id,
         src_addr,
         dst_addr,
+        func_id,
         src_port,
         dst_port,
         protocol,
-        _pad: [0; 5],
+        _pad: [0; 1],
     };
 
     PATH_EVENTS.output(ctx, &event, 0);
@@ -306,9 +314,8 @@ path_kprobe!(path_tcp_data_queue, 10);
 // UDP rx
 path_kprobe!(path_udp_rcv, 11);
 path_kprobe!(path_udp_queue_rcv_skb, 12);
-// Socket
-path_kprobe!(path_sock_sendmsg, 13);
-path_kprobe!(path_sock_recvmsg, 14);
+// Socket: sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff *,
+// so they cannot use handle_skb(). Skipped until a separate handler is written.
 // TCP tx
 path_kprobe!(path_tcp_sendmsg, 15);
 path_kprobe!(path_tcp_write_xmit, 16);

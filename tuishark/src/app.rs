@@ -1294,10 +1294,16 @@ impl App {
                             if let Some(idx) = self.selected_packet {
                                 if let Some(summary) = self.store.get(idx) {
                                     if let Some(fk) = flow_key_from_summary(summary) {
-                                        let _ = engine.set_path_filter(&fk);
-                                        self.path_trace_state = PathTraceState::Filtered;
-                                        self.status_message = Some("Path tracing: filtered to selected flow".into());
-                                        return;
+                                        match engine.set_path_filter(&fk) {
+                                            Ok(()) => {
+                                                self.path_trace_state = PathTraceState::Filtered;
+                                                self.status_message = Some("Path tracing: filtered to selected flow".into());
+                                                return;
+                                            }
+                                            Err(e) => {
+                                                self.status_message = Some(format!("Path filter failed: {e}"));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1316,24 +1322,46 @@ impl App {
                     if let Some(summary) = self.store.get(idx) {
                         if let Some(fk) = flow_key_from_summary(summary) {
                             if let Some(ref mut engine) = self.trace_engine {
-                                let _ = engine.set_path_filter(&fk);
-                                self.path_trace_state = PathTraceState::Filtered;
-                                self.status_message = Some("Path tracing: filtered to selected flow".into());
+                                match engine.set_path_filter(&fk) {
+                                    Ok(()) => {
+                                        self.path_trace_state = PathTraceState::Filtered;
+                                        self.status_message = Some("Path tracing: filtered to selected flow".into());
+                                    }
+                                    Err(e) => {
+                                        self.status_message = Some(format!("Path filter failed: {e}"));
+                                    }
+                                }
                             }
+                            return;
                         }
                     }
                 }
+                self.status_message = Some("Select a TCP/UDP packet to filter path tracing".into());
             }
             PathTraceState::Filtered if self.enable_trace_path => {
                 // --trace-path mode: widen back to all flows
                 if let Some(ref mut engine) = self.trace_engine {
-                    let _ = engine.clear_path_filter();
-                    self.path_trace_state = PathTraceState::Active;
-                    self.status_message = Some("Path tracing: all flows".into());
+                    match engine.clear_path_filter() {
+                        Ok(()) => {
+                            self.path_trace_state = PathTraceState::Active;
+                            self.status_message = Some("Path tracing: all flows".into());
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Path filter clear failed: {e}"));
+                        }
+                    }
                 }
             }
             PathTraceState::Active | PathTraceState::Filtered => {
-                // --trace mode (on-demand): detach
+                // --trace mode (on-demand): detach — flush pending paths first
+                self.path_aggregator.flush();
+                let completed = self.path_aggregator.drain_completed();
+                if !completed.is_empty() {
+                    let matches = PathAggregator::match_to_packets(&completed, &self.recent_flow_keys);
+                    for (pkt_idx, path) in matches {
+                        self.path_store.insert(pkt_idx, path);
+                    }
+                }
                 self.path_engine = None;
                 self.path_trace_state = PathTraceState::Inactive;
                 self.status_message = Some("Path tracing disabled".into());

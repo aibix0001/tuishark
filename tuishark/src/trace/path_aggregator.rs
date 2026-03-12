@@ -41,6 +41,27 @@ impl PathAggregator {
                     events: Vec::with_capacity(8),
                     last_update: now,
                 });
+
+            // Validate 5-tuple consistency: if this event's 5-tuple differs from
+            // existing events, the skb_ptr was reused for a different packet.
+            // Start a new pending path in that case.
+            if !entry.events.is_empty() {
+                let first = &entry.events[0];
+                if first.src_addr != event.src_addr
+                    || first.dst_addr != event.dst_addr
+                    || first.protocol != event.protocol
+                {
+                    // skb_ptr reuse detected — finalize old path, start new one
+                    let old = std::mem::replace(entry, PendingPath {
+                        events: Vec::with_capacity(8),
+                        last_update: now,
+                    });
+                    if let Some(path) = Self::build_path(old.events) {
+                        self.completed.push(path);
+                    }
+                }
+            }
+
             entry.events.push(*event);
             entry.last_update = now;
         }
@@ -52,13 +73,14 @@ impl PathAggregator {
         }
     }
 
-    /// Expire pending paths that haven't received new events for >100ms.
+    /// Expire pending paths that haven't received new events for >500ms.
     /// These are considered complete (the packet has finished traversing).
+    /// 500ms allows for slow paths (netfilter, qdisc delays, ARP resolution).
     fn expire_paths(&mut self, now: Instant) {
         let mut expired_keys = Vec::new();
 
         for (&skb_ptr, pending) in &self.pending {
-            if now.duration_since(pending.last_update).as_millis() >= 100 {
+            if now.duration_since(pending.last_update).as_millis() >= 500 {
                 expired_keys.push(skb_ptr);
             }
         }
@@ -71,15 +93,26 @@ impl PathAggregator {
             }
         }
 
-        // Also cap pending map size to prevent unbounded growth
+        // Cap pending map size to prevent unbounded growth.
+        // Finalize oldest entries rather than silently dropping them.
         if self.pending.len() > 10_000 {
-            // Remove oldest entries
             let mut entries: Vec<_> = self.pending.drain().collect();
             entries.sort_by_key(|(_, p)| p.last_update);
-            // Keep newest 5000
-            for (k, v) in entries.into_iter().skip(5000) {
+            // Finalize the oldest 5000 entries
+            for (_, pending) in entries.drain(..5000) {
+                if let Some(path) = Self::build_path(pending.events) {
+                    self.completed.push(path);
+                }
+            }
+            // Re-insert the newest entries
+            for (k, v) in entries {
                 self.pending.insert(k, v);
             }
+        }
+
+        // Also cap completed list
+        if self.completed.len() > 10_000 {
+            self.completed.drain(..5000);
         }
     }
 
@@ -135,33 +168,32 @@ impl PathAggregator {
 
     /// Match completed paths to captured packets by 5-tuple.
     ///
-    /// Returns a Vec of (packet_index, PacketPath) pairs.
-    /// Matching is done by comparing the path's 5-tuple against the packet's FlowKey.
+    /// Uses a HashMap for O(n+m) lookup instead of O(n*m) nested loops.
+    /// For each path, finds the most recent matching packet (last in the list).
     pub fn match_to_packets(
         paths: &[PacketPath],
         packet_flow_keys: &[(usize, FlowKey)],
     ) -> Vec<(usize, PacketPath)> {
+        if paths.is_empty() || packet_flow_keys.is_empty() {
+            return Vec::new();
+        }
+
+        // Build a lookup: FlowKey -> most recent packet index.
+        // Since packet_flow_keys is ordered by time (newest last), last write wins.
+        let mut fwd_map: HashMap<(u32, u32, u16, u16, u8), usize> = HashMap::new();
+        let mut rev_map: HashMap<(u32, u32, u16, u16, u8), usize> = HashMap::new();
+        for &(pkt_idx, ref fk) in packet_flow_keys {
+            let key = (fk.src_addr, fk.dst_addr, fk.src_port, fk.dst_port, fk.protocol);
+            let rev = (fk.dst_addr, fk.src_addr, fk.dst_port, fk.src_port, fk.protocol);
+            fwd_map.insert(key, pkt_idx);
+            rev_map.insert(rev, pkt_idx);
+        }
+
         let mut matches = Vec::new();
-
         for path in paths {
-            // Find packets with matching 5-tuple (forward or reverse)
-            for &(pkt_idx, ref fk) in packet_flow_keys {
-                let fwd = path.src_addr == fk.src_addr
-                    && path.dst_addr == fk.dst_addr
-                    && path.src_port == fk.src_port
-                    && path.dst_port == fk.dst_port
-                    && path.protocol == fk.protocol;
-
-                let rev = path.src_addr == fk.dst_addr
-                    && path.dst_addr == fk.src_addr
-                    && path.src_port == fk.dst_port
-                    && path.dst_port == fk.src_port
-                    && path.protocol == fk.protocol;
-
-                if fwd || rev {
-                    matches.push((pkt_idx, path.clone()));
-                    break; // One path → one packet (first match wins)
-                }
+            let key = (path.src_addr, path.dst_addr, path.src_port, path.dst_port, path.protocol);
+            if let Some(&pkt_idx) = fwd_map.get(&key).or_else(|| rev_map.get(&key)) {
+                matches.push((pkt_idx, path.clone()));
             }
         }
 
@@ -183,13 +215,13 @@ mod tests {
         PathEvent {
             skb_ptr,
             timestamp_ns: ts,
-            func_id,
             src_addr: 0xC0A80101, // 192.168.1.1
             dst_addr: 0x0A000001, // 10.0.0.1
+            func_id,
             src_port: 12345,
             dst_port: 80,
             protocol: 6,
-            _pad: [0; 5],
+            _pad: [0; 1],
         }
     }
 
@@ -268,5 +300,37 @@ mod tests {
 
         let matches = PathAggregator::match_to_packets(&[path], &[(7, flow_key)]);
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn skb_ptr_reuse_detection() {
+        let mut agg = PathAggregator::new();
+
+        // First packet through skb_ptr 0x1000
+        let events1 = vec![
+            PathEvent {
+                skb_ptr: 0x1000, timestamp_ns: 1000,
+                src_addr: 0xC0A80101, dst_addr: 0x0A000001,
+                func_id: 0, src_port: 100, dst_port: 80,
+                protocol: 6, _pad: [0; 1],
+            },
+        ];
+        agg.ingest(&events1);
+
+        // Second packet reuses skb_ptr 0x1000 with different 5-tuple
+        let events2 = vec![
+            PathEvent {
+                skb_ptr: 0x1000, timestamp_ns: 2000,
+                src_addr: 0xDEADBEEF, dst_addr: 0xCAFEBABE,
+                func_id: 2, src_port: 200, dst_port: 443,
+                protocol: 6, _pad: [0; 1],
+            },
+        ];
+        agg.ingest(&events2);
+
+        // The first path should have been completed when reuse was detected
+        let completed = agg.drain_completed();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].src_addr, 0xC0A80101);
     }
 }

@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod dissect;
 mod event;
+mod ipinfo;
 mod export;
 mod filter;
 mod session;

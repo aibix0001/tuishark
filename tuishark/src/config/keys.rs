@@ -37,6 +37,7 @@ pub enum Action {
     TogglePathTrace,
     Help,
     ZoomPane,
+    IpInfo,
 }
 
 /// Keyboard configuration section.
@@ -82,6 +83,7 @@ pub struct KeyConfig {
     pub zoom_pane: String,
     pub next_packet: String,
     pub prev_packet: String,
+    pub ip_info: String,
 }
 
 impl Default for KeyConfig {
@@ -117,6 +119,7 @@ impl Default for KeyConfig {
             zoom_pane: "z".into(),
             next_packet: "ä".into(),
             prev_packet: "ö".into(),
+            ip_info: "i".into(),
         }
     }
 }
@@ -163,6 +166,7 @@ impl KeyBindings {
             (Action::ZoomPane, &config.zoom_pane, &defaults.zoom_pane),
             (Action::NextPacket, &config.next_packet, &defaults.next_packet),
             (Action::PrevPacket, &config.prev_packet, &defaults.prev_packet),
+            (Action::IpInfo, &config.ip_info, &defaults.ip_info),
         ];
 
         for &(action, user_str, default_str) in entries {

@@ -149,6 +149,7 @@ pub struct App {
     show_quit_confirm: bool,
     show_help_dialog: bool,
     help_scroll: usize,
+    help_content_height: usize,
     quit_after_save: bool,
     last_save_path: Option<PathBuf>,
     enable_deep: bool,
@@ -317,6 +318,7 @@ impl App {
             show_quit_confirm: false,
             show_help_dialog: false,
             help_scroll: 0,
+            help_content_height: 20,
             quit_after_save: false,
             last_save_path: None,
             enable_deep,
@@ -841,6 +843,10 @@ impl App {
 
         // Dialog overlays (priority order: help > quit > stats > export > save > open > preset > picker)
         if self.show_help_dialog {
+            // Compute content height for scroll clamping (dialog is 70% of area, minus chrome)
+            let dialog_h = ((frame.area().height as u32 * 70 / 100) as u16).max(10);
+            // Chrome: 2 border + 1 bottom hint = 3 lines reserved
+            self.help_content_height = dialog_h.saturating_sub(3) as usize;
             let dialog = HelpDialog::new(&self.config.keys, self.help_scroll, &self.theme);
             frame.render_widget(dialog, frame.area());
         } else if self.show_quit_confirm {
@@ -1865,20 +1871,21 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent) {
         let total = help_content_lines(&self.config.keys);
+        // Max scroll: leave at least one screenful visible.
+        // Content height depends on terminal size; use stored value from last render.
+        let max_scroll = total.saturating_sub(self.help_content_height.max(1));
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
                 self.show_help_dialog = false;
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.help_scroll + 1 < total {
-                    self.help_scroll += 1;
-                }
+                self.help_scroll = (self.help_scroll + 1).min(max_scroll);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.help_scroll = self.help_scroll.saturating_sub(1);
             }
             KeyCode::PageDown => {
-                self.help_scroll = (self.help_scroll + 10).min(total.saturating_sub(1));
+                self.help_scroll = (self.help_scroll + 10).min(max_scroll);
             }
             KeyCode::PageUp => {
                 self.help_scroll = self.help_scroll.saturating_sub(10);
@@ -1887,7 +1894,7 @@ impl App {
                 self.help_scroll = 0;
             }
             KeyCode::End | KeyCode::Char('G') => {
-                self.help_scroll = total.saturating_sub(1);
+                self.help_scroll = max_scroll;
             }
             _ => {}
         }

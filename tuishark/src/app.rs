@@ -157,7 +157,6 @@ pub struct App {
     trace_engine: Option<TraceEngine>,
     trace_store: TraceStore,
     trace_state: TraceState,
-    trace_map_entries: usize,
     // Export dialog (Phase 8)
     show_export_dialog: bool,
     export_step: ExportStep,
@@ -296,7 +295,6 @@ impl App {
             trace_engine,
             trace_store: TraceStore::default(),
             trace_state,
-            trace_map_entries: 0,
             // Export dialog
             show_export_dialog: false,
             export_step: ExportStep::FormatSelect,
@@ -443,12 +441,6 @@ impl App {
                     new_packets = true;
                 }
                 None => break,
-            }
-        }
-
-        if new_packets {
-            if let Some(ref mut engine) = self.trace_engine {
-                self.trace_map_entries = engine.map_entry_count();
             }
         }
 
@@ -729,13 +721,18 @@ impl App {
         let trace_info = self
             .selected_packet
             .and_then(|idx| self.trace_store.get(idx));
-        let trace_view = TraceView::new(
+        let mut trace_view = TraceView::new(
             trace_info,
             self.trace_state,
             &self.theme,
             self.active_pane == Pane::KernelTrace,
-        )
-        .with_map_entries(self.trace_map_entries);
+        );
+        // Only compute BPF map entry count when needed for diagnostics
+        if trace_info.is_none() && self.trace_state == TraceState::Active {
+            if let Some(ref mut engine) = self.trace_engine {
+                trace_view = trace_view.with_map_entries(engine.map_entry_count());
+            }
+        }
         frame.render_widget(trace_view, layout.bottom_right);
 
         // Status bar

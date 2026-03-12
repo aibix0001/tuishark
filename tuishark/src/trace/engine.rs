@@ -85,7 +85,6 @@ impl TraceEngine {
         };
         hash_map.keys().count()
     }
-
 }
 
 /// Stub engine when the trace feature is not compiled.

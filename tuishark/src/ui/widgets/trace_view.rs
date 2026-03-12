@@ -116,16 +116,17 @@ impl Widget for TraceView<'_> {
                         ]),
                     ]
                 } else {
-                    vec![
-                        Line::from(Span::styled(
-                            "No process info for this packet",
-                            Style::default().fg(self.theme.subtext0),
-                        )),
-                        Line::from(Span::styled(
-                            format!(" BPF map entries: {}", self.map_entries),
+                    let mut lines = vec![Line::from(Span::styled(
+                        "No process info for this packet",
+                        Style::default().fg(self.theme.subtext0),
+                    ))];
+                    if self.map_entries > 0 {
+                        lines.push(Line::from(Span::styled(
+                            format!("BPF map entries: {}", self.map_entries),
                             Style::default().fg(self.theme.surface2),
-                        )),
-                    ]
+                        )));
+                    }
+                    lines
                 }
             }
         };

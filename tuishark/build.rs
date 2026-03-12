@@ -53,8 +53,20 @@ fn main() {
             }
         }
 
-        // Rerun when eBPF source or config changes
-        println!("cargo:rerun-if-changed=../tuishark-ebpf/src/");
+        // Rerun when eBPF source or config changes.
+        // Note: watching a directory only triggers on child add/remove, NOT content edits.
+        // We must list individual source files to catch edits to existing files.
+        let ebpf_src = Path::new(env::var("CARGO_MANIFEST_DIR").unwrap().as_str())
+            .join("../tuishark-ebpf/src");
+        if ebpf_src.is_dir() {
+            for entry in fs::read_dir(&ebpf_src).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    println!("cargo:rerun-if-changed={}", path.display());
+                }
+            }
+        }
+        // Also watch Cargo.toml/lock for dependency changes
         println!("cargo:rerun-if-changed=../tuishark-ebpf/Cargo.toml");
         println!("cargo:rerun-if-changed=../tuishark-ebpf/Cargo.lock");
         // Also rerun if precompiled blob or arch sidecar changes (manual rebuild)
@@ -66,7 +78,8 @@ fn main() {
 /// Try to compile the eBPF crate from source using nightly + bpf-linker.
 /// Returns the path to the built binary on success, None on failure.
 fn try_build_ebpf() -> Option<PathBuf> {
-    let ebpf_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tuishark-ebpf");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let ebpf_dir = Path::new(&manifest_dir).join("../tuishark-ebpf");
     if !ebpf_dir.join("Cargo.toml").exists() {
         println!("cargo:warning=tuishark-ebpf source not found, skipping from-source build");
         return None;
@@ -84,6 +97,8 @@ fn try_build_ebpf() -> Option<PathBuf> {
 
     // Nested cargo invocations inherit env vars that cause conflicts.
     // Clear CARGO_* vars that interfere with the inner build.
+    // bpfel = little-endian BPF. Covers x86_64 and aarch64 (both LE).
+    // A big-endian host (s390x, some MIPS) would need bpfeb-unknown-none.
     let mut cmd = Command::new("cargo");
     cmd.args([
         "+nightly",
@@ -96,9 +111,16 @@ fn try_build_ebpf() -> Option<PathBuf> {
     ])
     .current_dir(&ebpf_dir);
 
-    // Remove env vars set by the outer cargo that break nested builds
+    // Remove env vars set by the outer cargo that break nested builds.
+    // Preserve CARGO_HOME and registry/network config for corporate/proxy environments.
+    let preserve = |k: &str| -> bool {
+        k == "CARGO_HOME"
+            || k.starts_with("CARGO_REGISTRIES_")
+            || k.starts_with("CARGO_HTTP_")
+            || k.starts_with("CARGO_NET_")
+    };
     for (key, _) in env::vars() {
-        if (key.starts_with("CARGO_") && key != "CARGO_HOME") || key == "RUSTUP_TOOLCHAIN" {
+        if (key.starts_with("CARGO_") && !preserve(&key)) || key == "RUSTUP_TOOLCHAIN" {
             cmd.env_remove(&key);
         }
     }
@@ -127,15 +149,17 @@ fn try_build_ebpf() -> Option<PathBuf> {
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            // Only print the last few lines to avoid flooding the build log
+            let exit = match o.status.code() {
+                Some(c) => c.to_string(),
+                None => "signal".into(),
+            };
+            println!("cargo:warning=eBPF from-source build failed (exit {exit}):");
+            // Emit last 15 lines as separate warnings so they render reliably
             let lines: Vec<&str> = stderr.lines().collect();
-            let start = lines.len().saturating_sub(5);
-            let tail = lines[start..].join("\n");
-            println!(
-                "cargo:warning=eBPF from-source build failed (exit {}):\n{}",
-                o.status.code().map_or("signal".to_string(), |c| c.to_string()),
-                tail
-            );
+            let start = lines.len().saturating_sub(15);
+            for line in &lines[start..] {
+                println!("cargo:warning=  {line}");
+            }
             None
         }
         Err(e) => {

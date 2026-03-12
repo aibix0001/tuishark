@@ -48,5 +48,6 @@ The precompiled blob and `build.sh` are retained for environments without nightl
 
 **Remaining risks:**
 
-- The hardcoded `sk_buff` struct offsets (transport_header=182, network_header=184, head=200) are validated against Linux 6.19.3. These may shift across major kernel versions or distro configs. Path tracing will silently produce zero events on kernels with different offsets. Migration to CO-RE/BTF (TODO in the eBPF source) is the long-term fix.
+- The hardcoded `sk_buff` struct offsets (transport_header=182, network_header=184, head=200) are validated against Linux 6.19.3 but are **config-dependent, not just version-dependent**. Kernel config options like `CONFIG_NET_SCHED`, `CONFIG_NET_CLS_ACT`, and `CONFIG_XFRM` add or remove fields before the header offsets, which can shift them on a different distro kernel even on the same architecture. Path tracing will silently produce zero events on kernels with different offsets. Migration to CO-RE/BTF is tracked as a follow-up issue and is the long-term fix.
 - The `sock_common` offsets (0, 4, 12, 14, 16) have been stable since Linux 2.6 and are effectively ABI. Low risk.
+- The eBPF build targets `bpfel-unknown-none` (little-endian BPF), which covers x86_64 and aarch64. Big-endian hosts (s390x, MIPS BE) would need `bpfeb-unknown-none`.

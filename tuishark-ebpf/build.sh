@@ -12,7 +12,10 @@ cargo +nightly build \
 
 cp target/bpfel-unknown-none/release/tuishark-ebpf ../tuishark/ebpf/tuishark-ebpf
 
-# Record the host architecture so the fallback path can validate at runtime
-uname -m > ../tuishark/ebpf/tuishark-ebpf.arch
+# Record the Rust-canonical architecture name so the fallback path can validate
+# at runtime against std::env::consts::ARCH. uname -m diverges on some platforms
+# (e.g. armv7l vs arm, i686 vs x86), so we use rustc to get the canonical name.
+RUST_ARCH=$(rustc -vV | grep '^host:' | cut -d- -f1 | awk '{print $2}')
+echo "$RUST_ARCH" > ../tuishark/ebpf/tuishark-ebpf.arch
 
-echo "eBPF binary built and copied to tuishark/ebpf/tuishark-ebpf (arch: $(uname -m))"
+echo "eBPF binary built and copied to tuishark/ebpf/tuishark-ebpf (arch: $RUST_ARCH)"

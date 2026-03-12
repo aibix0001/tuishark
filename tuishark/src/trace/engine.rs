@@ -27,7 +27,14 @@ impl TraceEngine {
         // x86_64 silently reads the wrong register on aarch64 (and vice versa).
         const EBPF_BLOB_ARCH: &str = env!("TUISHARK_EBPF_ARCH");
         let host_arch = std::env::consts::ARCH;
-        if EBPF_BLOB_ARCH != "unknown" && EBPF_BLOB_ARCH != host_arch {
+        if EBPF_BLOB_ARCH == "unknown" {
+            return Err(
+                "eBPF blob has unknown target architecture — cannot verify pt_regs compatibility. \
+                 Install nightly + bpf-linker and rebuild with: cargo build --features trace"
+                    .into(),
+            );
+        }
+        if EBPF_BLOB_ARCH != host_arch {
             return Err(format!(
                 "eBPF blob was compiled for {EBPF_BLOB_ARCH} but running on {host_arch}. \
                  Install nightly + bpf-linker and rebuild with: cargo build --features trace"

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -113,6 +114,7 @@ pub struct App {
     theme: Theme,
     detail: Option<PacketDetail>,
     expanded_layers: Vec<bool>,
+    collapsed_layers: HashSet<String>,
     selected_layer: Option<usize>,
     selected_field: Option<usize>,
     highlight_range: Option<(usize, usize)>,
@@ -288,6 +290,7 @@ impl App {
             theme,
             detail: None,
             expanded_layers: Vec::new(),
+            collapsed_layers: HashSet::new(),
             selected_layer: None,
             selected_field: None,
             highlight_range: None,
@@ -567,10 +570,13 @@ impl App {
             }
 
             if let Some(detail) = result.detail {
-                let layer_count = detail.layers.len();
+                self.expanded_layers = detail
+                    .layers
+                    .iter()
+                    .map(|l| !self.collapsed_layers.contains(&Self::layer_key(&l.name)))
+                    .collect();
                 self.detail = Some(detail);
-                self.expanded_layers = vec![true; layer_count];
-                self.selected_layer = if layer_count > 0 { Some(0) } else { None };
+                self.selected_layer = if !self.expanded_layers.is_empty() { Some(0) } else { None };
                 self.selected_field = None;
                 self.detail_scroll_offset = 0;
                 self.dissect_state = DissectState::Deep;
@@ -1317,6 +1323,16 @@ impl App {
                     if let Some(idx) = self.selected_layer {
                         if idx < self.expanded_layers.len() {
                             self.expanded_layers[idx] = !self.expanded_layers[idx];
+                            if let Some(ref detail) = self.detail {
+                                if let Some(layer) = detail.layers.get(idx) {
+                                    let key = Self::layer_key(&layer.name);
+                                    if self.expanded_layers[idx] {
+                                        self.collapsed_layers.remove(&key);
+                                    } else {
+                                        self.collapsed_layers.insert(key);
+                                    }
+                                }
+                            }
                             if !self.expanded_layers[idx] {
                                 self.selected_field = None;
                             }
@@ -1520,6 +1536,16 @@ impl App {
                     if let Some(idx) = self.selected_layer {
                         if idx < self.expanded_layers.len() {
                             self.expanded_layers[idx] = !self.expanded_layers[idx];
+                            if let Some(ref detail) = self.detail {
+                                if let Some(layer) = detail.layers.get(idx) {
+                                    let key = Self::layer_key(&layer.name);
+                                    if self.expanded_layers[idx] {
+                                        self.collapsed_layers.remove(&key);
+                                    } else {
+                                        self.collapsed_layers.insert(key);
+                                    }
+                                }
+                            }
                             // Clear field selection when collapsing
                             if !self.expanded_layers[idx] {
                                 self.selected_field = None;
@@ -1533,6 +1559,28 @@ impl App {
         }
     }
 
+    /// Canonical key for a layer name, normalizing across fast dissection
+    /// (e.g. "IPv4, Src: 1.2.3.4, Dst: 5.6.7.8") and deep/tshark dissection
+    /// (e.g. "ip") so that collapse state is shared across packets and
+    /// survives the fast→deep transition.
+    fn layer_key(name: &str) -> String {
+        let prefix = name.split(',').next().unwrap_or(name).trim();
+        match prefix.to_ascii_lowercase().as_str() {
+            "ethernet ii" | "eth" => "eth".into(),
+            "ipv4" | "ip" => "ip".into(),
+            "ipv6" => "ipv6".into(),
+            "tcp" => "tcp".into(),
+            "udp" => "udp".into(),
+            "icmpv4" | "icmp" => "icmp".into(),
+            "icmpv6" => "icmpv6".into(),
+            "arp" => "arp".into(),
+            "dns" => "dns".into(),
+            "http" => "http".into(),
+            "tls" | "ssl" => "tls".into(),
+            other => other.into(),
+        }
+    }
+
     fn select_packet(&mut self, index: usize) {
         self.selected_packet = Some(index);
 
@@ -1543,10 +1591,13 @@ impl App {
         if let Some(raw) = raw_owned {
             // Fast dissection (immediate)
             let detail = dissect_detail(&raw);
-            let layer_count = detail.layers.len();
+            self.expanded_layers = detail
+                .layers
+                .iter()
+                .map(|l| !self.collapsed_layers.contains(&Self::layer_key(&l.name)))
+                .collect();
             self.detail = Some(detail);
-            self.expanded_layers = vec![true; layer_count];
-            self.selected_layer = if layer_count > 0 { Some(0) } else { None };
+            self.selected_layer = if !self.expanded_layers.is_empty() { Some(0) } else { None };
             self.selected_field = None;
             self.detail_scroll_offset = 0;
             self.trace_scroll_offset = 0;
@@ -1686,6 +1737,7 @@ impl App {
         self.scroll_offset = 0;
         self.detail = None;
         self.expanded_layers.clear();
+        self.collapsed_layers.clear();
         self.selected_layer = None;
         self.selected_field = None;
         self.highlight_range = None;

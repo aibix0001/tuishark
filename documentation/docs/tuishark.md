@@ -3,8 +3,8 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15", "#19", "#20"]
-related_mrs: ["!2", "!4", "!7", "!18"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15", "#19", "#20", "#22", "#23"]
+related_mrs: ["!2", "!4", "!7", "!18", "!22", "!23"]
 ---
 
 ## Overview
@@ -175,7 +175,7 @@ The application follows a 4-pane layout:
 ### Two-tier packet dissection
 
 - **Fast path** (`etherparse`): Zero-copy parsing for summary fields on every packet during capture. Provides immediate detail when selecting a packet.
-- **Deep path** (`rtshark`, Phase 3): Full Wireshark-grade dissection via tshark subprocess, on-demand per selected packet. Runs in a background worker thread and replaces the fast result with richer protocol layers (HTTP headers, DNS queries, TLS handshake details, etc.) when ready.
+- **Deep path** (`rtshark`, Phase 3): Full Wireshark-grade dissection via tshark subprocess, on-demand per selected packet. Runs in a background worker thread and replaces the fast result with richer protocol layers (HTTP headers, DNS queries, TLS handshake details, etc.) when ready. Deep dissection preserves descriptive layer names (e.g. "IPv4, Src: 1.2.3.4, Dst: 5.6.7.8") by enriching tshark's raw protocol names with field data.
 
 The deep path uses a named FIFO to stream packets to a long-running tshark process, avoiding per-packet process startup overhead. If tshark is not installed, the application falls back to etherparse-only mode. Use `--no-deep` to explicitly disable deep dissection.
 
@@ -293,6 +293,8 @@ When a display filter is active, only matching packets are exported by default. 
 
 ## Changelog
 
+- 2026-03-12: Descriptive deep dissection layer names — detail tree shows "IPv4, Src: ..., Dst: ..." instead of plain "ip" after tshark dissection (#23, !23)
+- 2026-03-12: Left/right arrow keys collapse/expand detail tree nodes (#22, !22)
 - 2026-03-12: Global packet navigation — `ö`/`ä` select prev/next packet from any pane, including zoomed views (#20)
 - 2026-03-12: Pane zoom toggle — press `z` to zoom active pane, `z` again to restore layout (#19)
 - 2026-03-10: Phase 9 — configuration system: TOML config, themes, keybindings, filter presets, display preferences

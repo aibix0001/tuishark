@@ -1,4 +1,5 @@
 use super::model::{FlowKey, ProcessInfo};
+use super::path_engine::PathTraceEngine;
 
 #[cfg(feature = "trace")]
 use aya::{
@@ -75,6 +76,22 @@ impl TraceEngine {
         hash_map.get(&rev, 0).ok()
     }
 
+    /// Attach path-tracing kprobes and open perf buffers.
+    /// Returns a PathTraceEngine that can poll for path events.
+    pub fn attach_path_engine(&mut self) -> Result<PathTraceEngine, String> {
+        PathTraceEngine::attach(&mut self.bpf)
+    }
+
+    /// Set the BPF-side path trace filter to a specific flow.
+    pub fn set_path_filter(&mut self, flow_key: &FlowKey) -> Result<(), String> {
+        PathTraceEngine::set_filter(&mut self.bpf, flow_key)
+    }
+
+    /// Clear the BPF-side path trace filter (trace all flows).
+    pub fn clear_path_filter(&mut self) -> Result<(), String> {
+        PathTraceEngine::clear_filter(&mut self.bpf)
+    }
+
     /// Return the number of entries currently in the BPF flow map.
     pub fn map_entry_count(&mut self) -> usize {
         let Some(map) = self.bpf.map_mut("FLOW_MAP") else {
@@ -99,6 +116,18 @@ impl TraceEngine {
 
     pub fn lookup(&mut self, _key: &FlowKey) -> Option<ProcessInfo> {
         None
+    }
+
+    pub fn attach_path_engine(&mut self) -> Result<PathTraceEngine, String> {
+        Err("Not compiled with eBPF support (build with --features trace)".into())
+    }
+
+    pub fn set_path_filter(&mut self, _flow_key: &FlowKey) -> Result<(), String> {
+        Err("Not compiled with eBPF support".into())
+    }
+
+    pub fn clear_path_filter(&mut self) -> Result<(), String> {
+        Err("Not compiled with eBPF support".into())
     }
 
     pub fn map_entry_count(&mut self) -> usize {

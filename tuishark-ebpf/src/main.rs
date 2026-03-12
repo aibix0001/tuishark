@@ -2,9 +2,9 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_probe_read_kernel},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_ktime_get_ns, bpf_probe_read_kernel},
     macros::{kprobe, map},
-    maps::LruHashMap,
+    maps::{Array, LruHashMap, PerfEventArray},
     programs::ProbeContext,
 };
 
@@ -27,11 +27,80 @@ struct ProcessInfo {
     comm: [u8; 16],
 }
 
+/// Path event — must match the userspace PathEvent layout exactly.
+/// Emitted by path-tracing kprobes to the PATH_EVENTS perf buffer.
+#[repr(C)]
+struct PathEvent {
+    skb_ptr: u64,
+    timestamp_ns: u64,
+    func_id: u16,
+    src_addr: u32,
+    dst_addr: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    _pad: [u8; 5],
+}
+
+/// Filter for path tracing — written by userspace to narrow tracing to a specific flow.
+#[repr(C)]
+struct TraceFilter {
+    src_addr: u32,
+    dst_addr: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    active: u8,
+    _pad: [u8; 2],
+}
+
 const AF_INET: u16 = 2;
 
-/// LRU hash map shared between all kprobes and userspace.
+// ─── sk_buff struct offsets for Linux 6.x (x86_64/aarch64, 64-bit) ────────
+//
+// These are hardcoded offsets into `struct sk_buff`. They are stable across
+// the Linux 6.x series on 64-bit with typical distro configs.
+//
+// TODO: Migrate to CO-RE/BTF for kernel-version-independent access.
+//
+// Validated against pahole output for Linux 6.8+ (typical distro config):
+//   sk_buff->transport_header : offset 184, size 2 (__u16)
+//   sk_buff->network_header   : offset 186, size 2 (__u16)
+//   sk_buff->mac_header       : offset 188, size 2 (__u16)
+//   sk_buff->head             : offset 224, size 8 (unsigned char *)
+//
+// struct iphdr offsets (standard, all architectures):
+//   iphdr->protocol : offset 9, size 1
+//   iphdr->saddr    : offset 12, size 4
+//   iphdr->daddr    : offset 16, size 4
+//
+// TCP/UDP header (first 4 bytes are source/dest port on both):
+//   tcphdr/udphdr->source : offset 0, size 2 (network byte order)
+//   tcphdr/udphdr->dest   : offset 2, size 2 (network byte order)
+
+const SKB_OFF_TRANSPORT_HEADER: usize = 184;
+const SKB_OFF_NETWORK_HEADER: usize = 186;
+const SKB_OFF_HEAD: usize = 224;
+
+const IPHDR_OFF_PROTOCOL: usize = 9;
+const IPHDR_OFF_SADDR: usize = 12;
+const IPHDR_OFF_DADDR: usize = 16;
+
+// ─── BPF maps ──────────────────────────────────────────────────────────────
+
+/// LRU hash map shared between all kprobes and userspace (existing process info).
 #[map]
 static FLOW_MAP: LruHashMap<FlowKey, ProcessInfo> = LruHashMap::with_max_entries(65536, 0);
+
+/// Perf event array for streaming path events to userspace.
+#[map]
+static PATH_EVENTS: PerfEventArray<PathEvent> = PerfEventArray::new(0);
+
+/// Single-element array holding the active trace filter (written by userspace).
+#[map]
+static TRACE_FILTER: Array<TraceFilter> = Array::with_max_entries(1, 0);
+
+// ─── Existing process-info tracing (unchanged) ────────────────────────────
 
 /// Extract the 5-tuple from a `struct sock *` and store process info.
 /// The sock pointer is the first argument to tcp_sendmsg/tcp_recvmsg/udp_sendmsg/udp_recvmsg.
@@ -118,6 +187,142 @@ kprobe_handler!(trace_tcp_sendmsg, 6);
 kprobe_handler!(trace_tcp_recvmsg, 6);
 kprobe_handler!(trace_udp_sendmsg, 17);
 kprobe_handler!(trace_udp_recvmsg, 17);
+
+// ─── Path tracing: sk_buff extraction + event emission ────────────────────
+
+/// Extract 5-tuple from an `sk_buff *`, check against TRACE_FILTER,
+/// and emit a PathEvent to the PATH_EVENTS perf buffer.
+///
+/// The sk_buff pointer is the first argument to most networking kprobes.
+/// We read the network and transport headers from the sk_buff's linear data area.
+#[inline(always)]
+unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16) -> Result<(), i64> {
+    let skb: *const u8 = ctx.arg(0).ok_or(1i64)?;
+
+    // Read sk_buff->head (pointer to linear data buffer)
+    let head: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_HEAD) as *const *const u8)?;
+
+    // Read sk_buff->network_header (u16 offset from head)
+    let net_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_NETWORK_HEADER) as *const u16)?;
+
+    // Read sk_buff->transport_header (u16 offset from head)
+    let trans_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_TRANSPORT_HEADER) as *const u16)?;
+
+    // Bail if headers not set (offset 0xFFFF means "not set" in the kernel)
+    if net_off == 0xFFFF {
+        return Ok(());
+    }
+
+    // Compute IP header pointer
+    let iphdr = head.add(net_off as usize);
+
+    // Read IP fields
+    let protocol: u8 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_PROTOCOL) as *const u8)?;
+    let src_addr: u32 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_SADDR) as *const u32)?;
+    let dst_addr: u32 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_DADDR) as *const u32)?;
+
+    // Only trace TCP (6) and UDP (17)
+    if protocol != 6 && protocol != 17 {
+        return Ok(());
+    }
+
+    // Read ports from transport header (both TCP and UDP have ports at offset 0 and 2)
+    let (src_port, dst_port) = if trans_off != 0xFFFF {
+        let thdr = head.add(trans_off as usize);
+        let sp: u16 = bpf_probe_read_kernel(thdr as *const u16)?;
+        let dp: u16 = bpf_probe_read_kernel(thdr.add(2) as *const u16)?;
+        (u16::from_be(sp), u16::from_be(dp))
+    } else {
+        (0u16, 0u16)
+    };
+
+    // Check against TRACE_FILTER
+    if let Some(filter) = TRACE_FILTER.get(0) {
+        if filter.active != 0 {
+            // Filter is active — check if this packet matches.
+            // Match forward or reverse direction.
+            let fwd_match = src_addr == filter.src_addr
+                && dst_addr == filter.dst_addr
+                && src_port == filter.src_port
+                && dst_port == filter.dst_port
+                && protocol == filter.protocol;
+
+            let rev_match = src_addr == filter.dst_addr
+                && dst_addr == filter.src_addr
+                && src_port == filter.dst_port
+                && dst_port == filter.src_port
+                && protocol == filter.protocol;
+
+            if !fwd_match && !rev_match {
+                return Ok(());
+            }
+        }
+    }
+
+    let event = PathEvent {
+        skb_ptr: skb as u64,
+        timestamp_ns: bpf_ktime_get_ns(),
+        func_id,
+        src_addr,
+        dst_addr,
+        src_port,
+        dst_port,
+        protocol,
+        _pad: [0; 5],
+    };
+
+    PATH_EVENTS.output(ctx, &event, 0);
+
+    Ok(())
+}
+
+/// Macro for path-tracing kprobe handlers.
+/// Each handler calls handle_skb with the appropriate func_id.
+macro_rules! path_kprobe {
+    ($name:ident, $func_id:expr) => {
+        #[kprobe]
+        pub fn $name(ctx: ProbeContext) -> u32 {
+            match unsafe { handle_skb(&ctx, $func_id) } {
+                Ok(()) | Err(_) => 0,
+            }
+        }
+    };
+}
+
+// Ingress
+path_kprobe!(path_netif_receive_skb, 0);
+path_kprobe!(path___netif_receive_skb_core, 1);
+path_kprobe!(path_ip_rcv, 2);
+path_kprobe!(path_ip_rcv_finish, 3);
+path_kprobe!(path_ip_local_deliver, 4);
+path_kprobe!(path_ip_local_deliver_finish, 5);
+// Netfilter
+path_kprobe!(path_nf_hook_slow, 6);
+path_kprobe!(path_nf_conntrack_in, 7);
+// TCP rx
+path_kprobe!(path_tcp_v4_rcv, 8);
+path_kprobe!(path_tcp_rcv_established, 9);
+path_kprobe!(path_tcp_data_queue, 10);
+// UDP rx
+path_kprobe!(path_udp_rcv, 11);
+path_kprobe!(path_udp_queue_rcv_skb, 12);
+// Socket
+path_kprobe!(path_sock_sendmsg, 13);
+path_kprobe!(path_sock_recvmsg, 14);
+// TCP tx
+path_kprobe!(path_tcp_sendmsg, 15);
+path_kprobe!(path_tcp_write_xmit, 16);
+// UDP tx
+path_kprobe!(path_udp_sendmsg, 17);
+// IP out
+path_kprobe!(path_ip_output, 18);
+path_kprobe!(path_ip_finish_output, 19);
+// Forward
+path_kprobe!(path_ip_forward, 20);
+path_kprobe!(path_ip_forward_finish, 21);
+// Egress
+path_kprobe!(path_dev_queue_xmit, 22);
+path_kprobe!(path_dev_hard_start_xmit, 23);
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

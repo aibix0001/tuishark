@@ -96,9 +96,19 @@ const _: () = assert!(std::mem::size_of::<ContainerInfo>() == 40);
 
 impl ContainerInfo {
     /// Get the device name as a string (strips null bytes).
+    /// Returns "<unknown>" if the name is empty or contains non-printable bytes
+    /// (which can happen if kernel struct offsets are incorrect).
     pub fn dev_name_str(&self) -> &str {
         let len = self.dev_name.iter().position(|&b| b == 0).unwrap_or(16);
-        std::str::from_utf8(&self.dev_name[..len]).unwrap_or("<invalid>")
+        if len == 0 {
+            return "<unknown>";
+        }
+        let slice = &self.dev_name[..len];
+        // Sanity check: device names should be printable ASCII
+        if !slice.iter().all(|&b| b.is_ascii_graphic() || b == b'.') {
+            return "<unknown>";
+        }
+        std::str::from_utf8(slice).unwrap_or("<unknown>")
     }
 
     /// Get TCP state as a human-readable string.
@@ -122,7 +132,7 @@ impl ContainerInfo {
     }
 }
 
-// SAFETY: ContainerInfo is #[repr(C)] with only primitive fields (u32, [u8; 16], u8, [u8; 3], u64).
+// SAFETY: ContainerInfo is #[repr(C)] with only primitive fields (u64, u32, u32, [u8; 16], u8, [u8; 7]).
 // No pointers, references, or interior mutability. Valid for any bit pattern.
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for ContainerInfo {}
@@ -250,6 +260,19 @@ mod tests {
         };
         info.dev_name[..4].copy_from_slice(b"eth0");
         assert_eq!(info.dev_name_str(), "eth0");
+
+        // All-zero name returns "<unknown>"
+        let zero = ContainerInfo {
+            cgroup_id: 0, netns_inum: 0, ifindex: 0, dev_name: [0; 16],
+            tcp_state: 0, _pad: [0; 7],
+        };
+        assert_eq!(zero.dev_name_str(), "<unknown>");
+
+        // Garbage bytes (non-printable) returns "<unknown>"
+        let mut garbage = zero;
+        garbage.dev_name[0] = 0xFF;
+        garbage.dev_name[1] = 0x01;
+        assert_eq!(garbage.dev_name_str(), "<unknown>");
     }
 
     #[test]

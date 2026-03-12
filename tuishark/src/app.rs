@@ -518,11 +518,13 @@ impl App {
                             if let Some(info) = engine.lookup(&flow_key) {
                                 self.trace_store.insert(pkt_index, info);
                             }
-                            if let Some(cinfo) = engine.lookup_container(&flow_key) {
-                                self.container_store.insert(pkt_index, cinfo);
-                            }
                             // Path matching: try extracting a pending path immediately
                             if self.path_trace_state != PathTraceState::Inactive {
+                                // Container info piggybacks on path-trace kprobes;
+                                // only query when path tracing is active.
+                                if let Some(cinfo) = engine.lookup_container(&flow_key) {
+                                    self.container_store.insert(pkt_index, cinfo);
+                                }
                                 if let Some(path) = self.path_aggregator.try_extract_pending(&flow_key) {
                                     self.path_store.insert(pkt_index, path);
                                 }

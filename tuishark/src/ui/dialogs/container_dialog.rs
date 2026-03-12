@@ -89,54 +89,60 @@ impl Widget for ContainerDialog<'_> {
         let cx = inner.x + pad;
         let cw = inner.width.saturating_sub(pad * 2);
         let mut row = inner.y;
+        let max_row = inner.y + inner.height.saturating_sub(1); // reserve for help line
 
         // Network Namespace
-        let netns_str = if info.netns_inum == INIT_NETNS_INUM {
-            format!("{} (default)", info.netns_inum)
-        } else {
-            format!("{}", info.netns_inum)
-        };
-        render_field(cx, row, cw, "  Net NS", &netns_str, label_style, value_style, buf);
-        row += 1;
+        if row < max_row {
+            let netns_str = if info.netns_inum == INIT_NETNS_INUM {
+                format!("{} (default)", info.netns_inum)
+            } else {
+                info.netns_inum.to_string()
+            };
+            render_field(cx, row, cw, "  Net NS", &netns_str, label_style, value_style, buf);
+            row += 1;
+        }
 
         // Blank separator
         row += 1;
 
         // Network Device
-        let dev_str = format!("{} (#{})", info.dev_name_str(), info.ifindex);
-        render_field(cx, row, cw, "  Device", &dev_str, label_style, value_style, buf);
-        row += 1;
+        if row < max_row {
+            let dev_str = format!("{} (#{})", info.dev_name_str(), info.ifindex);
+            render_field(cx, row, cw, "  Device", &dev_str, label_style, value_style, buf);
+            row += 1;
+        }
 
         // Blank separator
         row += 1;
 
         // TCP State
-        let tcp_display = if self.protocol == 6 {
-            let state_str = info.tcp_state_str();
-            let state_style = tcp_state_style(info.tcp_state, self.theme);
-            // Render label + colored state
-            let line = Line::from(vec![
-                Span::styled("TCP State: ", label_style),
-                Span::styled(state_str, state_style),
-            ]);
-            buf.set_line(cx, row, &line, cw);
+        if row < max_row {
+            if self.protocol == 6 {
+                let state_str = info.tcp_state_str();
+                let state_style = tcp_state_style(info.tcp_state, self.theme);
+                let line = Line::from(vec![
+                    Span::styled("TCP State: ", label_style),
+                    Span::styled(state_str, state_style),
+                ]);
+                buf.set_line(cx, row, &line, cw);
+            } else {
+                render_field(cx, row, cw, "TCP State", "N/A (UDP)", label_style,
+                    Style::default().fg(self.theme.surface2), buf);
+            }
             row += 1;
-            true
-        } else {
-            render_field(cx, row, cw, "TCP State", "N/A (UDP)", label_style,
-                Style::default().fg(self.theme.surface2), buf);
-            row += 1;
-            false
-        };
-        let _ = tcp_display;
+        }
 
         // Blank separator
         row += 1;
 
-        // cgroup ID
-        if row < inner.y + inner.height.saturating_sub(1) {
-            let cgroup_str = format!("{}", info.cgroup_id);
-            render_field(cx, row, cw, " cgroup", &cgroup_str, label_style, value_style, buf);
+        // cgroup ID (only meaningful on TX path; 0 = not available)
+        if row < max_row {
+            let cgroup_str = if info.cgroup_id == 0 {
+                "N/A (RX path)".to_string()
+            } else {
+                info.cgroup_id.to_string()
+            };
+            render_field(cx, row, cw, "  cgroup", &cgroup_str, label_style, value_style, buf);
         }
 
         render_help_line(inner, buf, self.theme);

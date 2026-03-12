@@ -103,20 +103,36 @@ const SKB_OFF_TRANSPORT_HEADER: usize = 182;
 const SKB_OFF_NETWORK_HEADER: usize = 184;
 const SKB_OFF_HEAD: usize = 200;
 
-// net_device struct offsets (Linux 6.19.3):
+// ─── net_device struct offsets for Linux 6.x (x86_64/aarch64, 64-bit) ────
+//
+// These are hardcoded offsets into `struct net_device`. They vary across
+// kernel versions and configs (PREEMPT_RT, lockdep, debug options shift layout).
+//
+// TODO: Migrate to CO-RE/BTF for kernel-version-independent access.
+//
+// Validated against pahole output for Linux 6.19.3:
 //   net_device->ifindex  : offset 224, size 4 (int)
 //   net_device->nd_net   : offset 264, size 8 (possible_net_t containing struct net *)
-//   net_device->name     : offset 288, size 16 (char[16])
+//   net_device->name     : offset 288, size 16 (char[IFNAMSIZ])
+//
+// NOTE: net_device layout is LESS stable than sk_buff across kernel configs.
+// If container info shows garbage device names, re-validate with:
+//   pahole -C net_device /sys/kernel/btf/vmlinux
 const NETDEV_OFF_IFINDEX: usize = 224;
 const NETDEV_OFF_ND_NET: usize = 264;
 const NETDEV_OFF_NAME: usize = 288;
 
 // struct net -> ns_common offset, then ns_common->inum:
-//   net->ns     : offset 152 (struct ns_common)
+//   net->ns         : offset 152 (struct ns_common)
 //   ns_common->inum : offset 24 (unsigned int)
+//
+// Validated against pahole output for Linux 6.19.3:
+//   pahole -C net /sys/kernel/btf/vmlinux
+//   pahole -C ns_common /sys/kernel/btf/vmlinux
 const NET_OFF_NS_INUM: usize = 152 + 24;
 
 // sock_common->skc_state : offset 18, size 1 (volatile unsigned char)
+// This offset is stable across Linux 6.x (sock_common is densely packed).
 const SKC_OFF_STATE: usize = 18;
 
 const IPHDR_OFF_PROTOCOL: usize = 9;
@@ -347,8 +363,17 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result
             0
         };
 
-        // cgroup ID from current task context
-        let cgroup_id = bpf_get_current_cgroup_id();
+        // cgroup ID from current task context.
+        // NOTE: bpf_get_current_cgroup_id() returns the cgroup of the currently
+        // executing task. On the RX path (softirq context, func_ids 0-12), the
+        // "current" task is whatever was interrupted — NOT the connection owner.
+        // We only populate cgroup_id for TX-path func_ids (18-23) where the
+        // calling process is the actual sender. For RX, we store 0.
+        let cgroup_id = if func_id >= 18 {
+            bpf_get_current_cgroup_id()
+        } else {
+            0
+        };
 
         let container_info = ContainerInfo {
             cgroup_id,

@@ -73,9 +73,12 @@ impl TraceEngine {
                 .map_err(|e| format!("Failed to attach kprobe to '{fn_name}': {e}"))?;
         }
 
-        // Verify the map exists at load time
+        // Verify the maps exist at load time
         if bpf.map_mut("FLOW_MAP").is_none() {
             return Err("FLOW_MAP not found in eBPF program".into());
+        }
+        if bpf.map_mut("CONTAINER_MAP").is_none() {
+            return Err("CONTAINER_MAP not found in eBPF program".into());
         }
 
         Ok(Self { bpf })

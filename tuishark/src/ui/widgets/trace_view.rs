@@ -6,8 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::trace::model::{ContainerInfo, ProcessInfo, TraceState};
+use crate::trace::model::{ContainerInfo, ProcessInfo, TraceState, INIT_NETNS_INUM};
 use crate::trace::path_model::{PacketPath, PathTraceState, Subsystem};
+use crate::ui::dialogs::container_dialog::tcp_state_style;
 use crate::ui::theme::Theme;
 
 pub struct TraceView<'a> {
@@ -192,7 +193,7 @@ impl Widget for TraceView<'_> {
                     )));
 
                     // Device + NetNS on one line
-                    let netns_label = if cinfo.netns_inum == 4026531840 {
+                    let netns_label = if cinfo.netns_inum == INIT_NETNS_INUM {
                         "default".to_string()
                     } else {
                         cinfo.netns_inum.to_string()
@@ -216,17 +217,10 @@ impl Widget for TraceView<'_> {
                     } else {
                         "N/A"
                     };
-                    let tcp_color = if self.protocol == 6 {
-                        match cinfo.tcp_state {
-                            1 => self.theme.green,     // ESTABLISHED
-                            2 | 3 => self.theme.yellow, // SYN_SENT/RECV
-                            10 => self.theme.blue,     // LISTEN
-                            7 => self.theme.red,       // CLOSE
-                            0 => self.theme.subtext0,  // N/A
-                            _ => self.theme.peach,     // teardown states
-                        }
+                    let tcp_style = if self.protocol == 6 {
+                        tcp_state_style(cinfo.tcp_state, self.theme)
                     } else {
-                        self.theme.subtext0
+                        Style::default().fg(self.theme.subtext0)
                     };
 
                     let cgroup_str = if cinfo.cgroup_id == 0 {
@@ -237,10 +231,7 @@ impl Widget for TraceView<'_> {
 
                     lines.push(Line::from(vec![
                         Span::styled(" TCP:     ", label_style),
-                        Span::styled(
-                            tcp_str,
-                            Style::default().fg(tcp_color),
-                        ),
+                        Span::styled(tcp_str, tcp_style),
                         Span::styled("    cgroup: ", label_style),
                         Span::styled(
                             cgroup_str,

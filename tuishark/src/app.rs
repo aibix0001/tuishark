@@ -523,7 +523,10 @@ impl App {
                                 // Container info piggybacks on path-trace kprobes;
                                 // only query when path tracing is active.
                                 if let Some(cinfo) = engine.lookup_container(&flow_key) {
-                                    self.container_store.insert(pkt_index, cinfo);
+                                    // Runtime canary: discard garbage from wrong kernel offsets
+                                    if cinfo.looks_valid() {
+                                        self.container_store.insert(pkt_index, cinfo);
+                                    }
                                 }
                                 if let Some(path) = self.path_aggregator.try_extract_pending(&flow_key) {
                                     self.path_store.insert(pkt_index, path);
@@ -849,6 +852,13 @@ impl App {
             frame.render_widget(hex_view, layout.bottom_left);
         }
 
+        // Protocol for selected packet (used by trace view + container dialog)
+        let selected_protocol = self.selected_packet
+            .and_then(|idx| self.store.get(idx))
+            .and_then(|s| flow_key_from_summary(s))
+            .map(|fk| fk.protocol)
+            .unwrap_or(0);
+
         // Kernel trace (Phase 6)
         if layout.bottom_right.height > 0 {
             let trace_info = self
@@ -860,11 +870,6 @@ impl App {
             let container_info = self
                 .selected_packet
                 .and_then(|idx| self.container_store.get(idx));
-            let protocol = self.selected_packet
-                .and_then(|idx| self.store.get(idx))
-                .and_then(|s| flow_key_from_summary(s))
-                .map(|fk| fk.protocol)
-                .unwrap_or(0);
             let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
             let mut trace_view = TraceView::new(
                 trace_info,
@@ -872,7 +877,7 @@ impl App {
                 &self.theme,
                 self.active_pane == Pane::KernelTrace,
             )
-            .with_container_info(container_info, protocol)
+            .with_container_info(container_info, selected_protocol)
             .with_kernel_path(kernel_path)
             .with_path_trace_state(self.path_trace_state)
             .with_events_lost(events_lost)
@@ -900,7 +905,7 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Dialog overlays (priority order: help > quit > stats > export > save > open > preset > picker)
+        // Dialog overlays (priority order: help > quit > stats > ipinfo > container > export > save > open > preset > picker)
         if self.show_help_dialog {
             // Compute content height for scroll clamping (dialog is 70% of area, minus chrome)
             let dialog_h = ((frame.area().height as u32 * 70 / 100) as u16).max(10);
@@ -946,16 +951,13 @@ impl App {
         } else if self.show_container_dialog {
             let container_info = self.selected_packet
                 .and_then(|idx| self.container_store.get(idx));
-            let protocol = self.selected_packet
-                .and_then(|idx| self.store.get(idx))
-                .and_then(|s| flow_key_from_summary(s))
-                .map(|fk| fk.protocol)
-                .unwrap_or(0);
             let trace_active = self.trace_state == TraceState::Active;
+            let path_trace_active = self.path_trace_state != PathTraceState::Inactive;
             let dialog = ContainerDialog::new(
                 container_info,
-                protocol,
+                selected_protocol,
                 trace_active,
+                path_trace_active,
                 &self.theme,
             );
             frame.render_widget(dialog, frame.area());

@@ -76,6 +76,10 @@ unsafe impl aya::Pod for FlowKey {}
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for ProcessInfo {}
 
+/// Default network namespace inode number on Linux (init_net).
+/// Used by UI code to label the default namespace.
+pub const INIT_NETNS_INUM: u32 = 4026531840;
+
 /// Container context from eBPF — network namespace, device, TCP state, cgroup.
 /// Must match the eBPF-side ContainerInfo layout exactly.
 ///
@@ -104,11 +108,34 @@ impl ContainerInfo {
             return "<unknown>";
         }
         let slice = &self.dev_name[..len];
-        // Sanity check: device names should be printable ASCII
-        if !slice.iter().all(|&b| b.is_ascii_graphic() || b == b'.') {
+        // Sanity check: device names should be printable ASCII (is_ascii_graphic covers 0x21-0x7E)
+        if !slice.iter().all(|&b| b.is_ascii_graphic()) {
             return "<unknown>";
         }
         std::str::from_utf8(slice).unwrap_or("<unknown>")
+    }
+
+    /// Runtime canary check: validates that kernel struct offsets produced sane data.
+    /// Returns false if values look like garbage (wrong net_device offsets, etc.).
+    pub fn looks_valid(&self) -> bool {
+        // ifindex should be > 0 if dev_ptr was valid
+        if self.ifindex == 0 {
+            return false;
+        }
+        // ifindex should be reasonable (Linux max is ~2^31 but practically < 65535)
+        if self.ifindex > 65535 {
+            return false;
+        }
+        // dev_name should contain at least one printable ASCII character
+        let name_len = self.dev_name.iter().position(|&b| b == 0).unwrap_or(16);
+        if name_len == 0 || !self.dev_name[..name_len].iter().all(|&b| b.is_ascii_graphic()) {
+            return false;
+        }
+        // tcp_state should be a valid enum value (0-12)
+        if self.tcp_state > 12 {
+            return false;
+        }
+        true
     }
 
     /// Get TCP state as a human-readable string.

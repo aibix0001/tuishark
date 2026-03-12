@@ -119,6 +119,8 @@ const SKB_OFF_HEAD: usize = 200;
 // If container info shows garbage device names, re-validate with:
 //   pahole -C net_device /sys/kernel/btf/vmlinux
 const NETDEV_OFF_IFINDEX: usize = 224;
+// REQUIRES CONFIG_NET_NS=y (standard on all distro kernels; required for containers).
+// When CONFIG_NET_NS=n, possible_net_t is an empty struct and this offset is invalid.
 const NETDEV_OFF_ND_NET: usize = 264;
 const NETDEV_OFF_NAME: usize = 288;
 
@@ -365,11 +367,12 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result
 
         // cgroup ID from current task context.
         // NOTE: bpf_get_current_cgroup_id() returns the cgroup of the currently
-        // executing task. On the RX path (softirq context, func_ids 0-12), the
-        // "current" task is whatever was interrupted — NOT the connection owner.
-        // We only populate cgroup_id for TX-path func_ids (18-23) where the
-        // calling process is the actual sender. For RX, we store 0.
-        let cgroup_id = if func_id >= 18 {
+        // executing task. On the RX path (softirq context, func_ids 0-12) and
+        // the forwarding path (func_ids 20-21: ip_forward/ip_forward_finish),
+        // the "current" task is whatever was interrupted — NOT the connection owner.
+        // We only populate cgroup_id for actual TX-path func_ids where the
+        // calling process is the sender. For RX/forward, we store 0.
+        let cgroup_id = if func_id >= 18 && func_id != 20 && func_id != 21 {
             bpf_get_current_cgroup_id()
         } else {
             0

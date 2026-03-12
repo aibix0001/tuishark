@@ -6,17 +6,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Widget},
 };
 
-use crate::trace::model::ContainerInfo;
+use crate::trace::model::{ContainerInfo, INIT_NETNS_INUM};
 use crate::ui::theme::Theme;
-
-/// Default network namespace inode number on Linux (init_net).
-const INIT_NETNS_INUM: u32 = 4026531840;
 
 pub struct ContainerDialog<'a> {
     info: Option<&'a ContainerInfo>,
     protocol: u8,
     theme: &'a Theme,
     trace_active: bool,
+    path_trace_active: bool,
 }
 
 impl<'a> ContainerDialog<'a> {
@@ -24,9 +22,10 @@ impl<'a> ContainerDialog<'a> {
         info: Option<&'a ContainerInfo>,
         protocol: u8,
         trace_active: bool,
+        path_trace_active: bool,
         theme: &'a Theme,
     ) -> Self {
-        Self { info, protocol, trace_active, theme }
+        Self { info, protocol, trace_active, path_trace_active, theme }
     }
 }
 
@@ -70,7 +69,11 @@ impl Widget for ContainerDialog<'_> {
         }
 
         let Some(info) = self.info else {
-            let msg = "No container context for this packet";
+            let msg = if !self.path_trace_active {
+                "Enable path tracing (Shift+P) for container context"
+            } else {
+                "No container context for this packet"
+            };
             let msg_x = inner.x + (inner.width.saturating_sub(msg.len() as u16)) / 2;
             let msg_y = inner.y + inner.height / 2;
             buf.set_line(msg_x, msg_y, &Line::from(Span::styled(
@@ -162,7 +165,8 @@ fn render_field(
     buf.set_line(x, y, &line, width);
 }
 
-fn tcp_state_style(state: u8, theme: &Theme) -> Style {
+/// Map TCP state to a themed style. Shared by container_dialog and trace_view.
+pub fn tcp_state_style(state: u8, theme: &Theme) -> Style {
     match state {
         1 => Style::default().fg(theme.green).add_modifier(Modifier::BOLD),   // ESTABLISHED
         2 | 3 => Style::default().fg(theme.yellow),                             // SYN_SENT, SYN_RECV
@@ -184,10 +188,8 @@ fn render_help_line(inner: Rect, buf: &mut Buffer, theme: &Theme) {
 
     let help = Line::from(vec![
         Span::styled(" ", dim_style),
-        Span::styled("ö", key_style),
-        Span::styled(":prev  ", dim_style),
-        Span::styled("ä", key_style),
-        Span::styled(":next  ", dim_style),
+        Span::styled("prev/next", key_style),
+        Span::styled(":navigate  ", dim_style),
         Span::styled("Esc", key_style),
         Span::styled(":close", dim_style),
     ]);

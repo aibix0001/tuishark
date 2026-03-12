@@ -46,12 +46,12 @@ struct Cli {
     cli_mode: bool,
 
     /// Display filter expression (CLI mode)
-    #[arg(short = 'f', long = "filter")]
+    #[arg(short = 'Y', long = "display-filter")]
     filter_expr: Option<String>,
 
-    /// Output format for CLI mode: text, csv, json
-    #[arg(long = "format", default_value = "text")]
-    output_format: String,
+    /// Output format for CLI mode
+    #[arg(long = "format", default_value = "text", value_enum)]
+    output_format: cli::OutputFormat,
 
     /// Stop after N packets (CLI mode)
     #[arg(short = 'c', long = "count")]
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
             cli.interface,
             cli.trace,
             cli.filter_expr,
-            &cli.output_format,
+            cli.output_format,
             cli.count,
         );
     }

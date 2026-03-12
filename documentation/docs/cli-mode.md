@@ -19,7 +19,7 @@ Activate CLI mode with the `--cli` flag. Either a pcap file or a live interface 
 
 ```bash
 sudo tuishark --cli capture.pcap
-sudo tuishark --cli capture.pcap -f "proto == tcp"
+sudo tuishark --cli capture.pcap -Y "proto == tcp"
 sudo tuishark --cli capture.pcap --format json
 ```
 
@@ -27,7 +27,7 @@ sudo tuishark --cli capture.pcap --format json
 
 ```bash
 sudo tuishark --cli -i eth0
-sudo tuishark --cli -i eth0 -f "port == 443" -c 100
+sudo tuishark --cli -i eth0 -Y "port == 443" -c 100
 sudo tuishark --cli -i eth0 --format csv
 sudo tuishark --cli -i eth0 --trace
 ```
@@ -45,7 +45,7 @@ sudo tuishark --cli capture.pcap --format csv > export.csv
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--cli` | | Enable CLI mode (no TUI) | off |
-| `--filter` | `-f` | Display filter expression | none |
+| `--display-filter` | `-Y` | Display filter expression | none |
 | `--format` | | Output format: `text`, `csv`, `json` | `text` |
 | `--count` | `-c` | Stop after N matching packets | unlimited |
 | `--trace` | | Enable eBPF process tracing | off |
@@ -70,7 +70,7 @@ When `--trace` is active, a process tag is appended:
 
 ### csv
 
-Header row followed by one row per packet. The `Info` field is quoted to handle embedded commas. Includes a `Process` column (empty when tracing is off).
+Header row followed by one row per packet. All variable-content fields are quoted per RFC 4180. Includes a `Process` column (empty when tracing is off).
 
 ### json
 
@@ -85,4 +85,4 @@ The CLI runner (`tuishark/src/cli.rs`) is self-contained with no TUI dependencie
 - `filter::parser::parse()` and `filter::eval::matches()` for display filtering
 - `trace::engine::TraceEngine` and `trace::lookup::flow_key_from_summary()` for eBPF process lookup
 
-Signal handling uses a global `AtomicBool` with `libc::signal(SIGINT/SIGTERM)` for clean shutdown during live capture. Broken pipe errors (e.g., from `| head`) are caught and result in a clean exit.
+Signal handling uses a global `AtomicBool` with `libc::signal(SIGINT/SIGTERM)` for clean shutdown during both live capture and file mode. Broken pipe errors (e.g., from `| head`) are caught and result in a clean exit.

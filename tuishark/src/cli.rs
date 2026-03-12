@@ -1,7 +1,7 @@
 /// CLI mode: print packets to stdout without the TUI.
 ///
 /// Supports live capture and pcap file reading with optional display filters,
-/// multiple output formats (text, csv, json), and eBPF process tracing.
+/// multiple output formats (text, csv, json/NDJSON), and eBPF process tracing.
 
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
+use clap::ValueEnum;
 
 use crate::capture::file::load_pcap;
 use crate::capture::live::LiveCapture;
@@ -18,16 +19,29 @@ use crate::filter::{ast::Expr, eval, parser};
 use crate::trace::engine::TraceEngine;
 use crate::trace::lookup::flow_key_from_summary;
 
+/// Output format for CLI mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// One line per packet, tshark-style columns
+    Text,
+    /// Header row + one CSV row per packet
+    Csv,
+    /// NDJSON — one JSON object per line, pipeable to jq
+    Json,
+}
+
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 extern "C" fn sigint_handler(_sig: libc::c_int) {
-    RUNNING.store(false, Ordering::Release);
+    RUNNING.store(false, Ordering::SeqCst);
 }
 
 fn install_signal_handler() {
+    // Reset RUNNING in case a previous invocation set it to false
+    RUNNING.store(true, Ordering::SeqCst);
     unsafe {
-        libc::signal(libc::SIGINT, sigint_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, sigint_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, sigint_handler as *const () as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, sigint_handler as *const () as usize as libc::sighandler_t);
     }
 }
 
@@ -36,13 +50,13 @@ pub fn run(
     interface: Option<String>,
     enable_trace: bool,
     filter_expr: Option<String>,
-    output_format: &str,
+    output_format: OutputFormat,
     count: Option<usize>,
 ) -> Result<()> {
-    let filter = match &filter_expr {
-        Some(expr) => Some(parser::parse(expr).map_err(|e| anyhow::anyhow!("bad filter: {e}"))?),
-        None => None,
-    };
+    let filter = filter_expr
+        .as_ref()
+        .map(|expr| parser::parse(expr).map_err(|e| anyhow::anyhow!("bad filter: {e}")))
+        .transpose()?;
 
     let mut trace_engine = if enable_trace {
         match TraceEngine::new() {
@@ -69,15 +83,20 @@ fn run_file(
     path: &std::path::Path,
     filter: Option<&Expr>,
     trace_engine: &mut Option<TraceEngine>,
-    format: &str,
+    format: OutputFormat,
     count: Option<usize>,
 ) -> Result<()> {
+    install_signal_handler();
+
     let (packets, _first_ts) = load_pcap(path)?;
     let mut out = BufWriter::new(io::stdout().lock());
-    write_header(&mut out, format, trace_engine.is_some())?;
+    write_header(&mut out, format)?;
 
     let mut printed = 0usize;
     for (summary, _raw) in &packets {
+        if !RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
         if let Some(max) = count {
             if printed >= max {
                 break;
@@ -104,18 +123,18 @@ fn run_live(
     interface: &str,
     filter: Option<&Expr>,
     trace_engine: &mut Option<TraceEngine>,
-    format: &str,
+    format: OutputFormat,
     count: Option<usize>,
 ) -> Result<()> {
     install_signal_handler();
 
     let mut capture = LiveCapture::start(interface, 0)?;
     let mut out = BufWriter::new(io::stdout().lock());
-    write_header(&mut out, format, trace_engine.is_some())?;
+    write_header(&mut out, format)?;
 
     let mut printed = 0usize;
 
-    while RUNNING.load(Ordering::Acquire) {
+    while RUNNING.load(Ordering::SeqCst) {
         if let Some(max) = count {
             if printed >= max {
                 break;
@@ -160,9 +179,9 @@ fn lookup_process(engine: &mut Option<TraceEngine>, summary: &PacketSummary) -> 
     Some(format!("[{}:{}]", info.pid, info.comm_str()))
 }
 
-fn write_header(out: &mut impl Write, format: &str, _has_trace: bool) -> io::Result<()> {
+fn write_header(out: &mut impl Write, format: OutputFormat) -> io::Result<()> {
     match format {
-        "csv" => writeln!(out, "No,Time,Source,Destination,Protocol,Length,Info,Process"),
+        OutputFormat::Csv => writeln!(out, "No,Time,Source,Destination,Protocol,Length,Info,Process"),
         _ => Ok(()), // text and json have no header
     }
 }
@@ -171,12 +190,12 @@ fn write_packet(
     out: &mut impl Write,
     pkt: &PacketSummary,
     proc_info: Option<&str>,
-    format: &str,
+    format: OutputFormat,
 ) -> io::Result<()> {
     let result = match format {
-        "csv" => write_csv(out, pkt, proc_info),
-        "json" => write_json(out, pkt, proc_info),
-        _ => write_text(out, pkt, proc_info),
+        OutputFormat::Csv => write_csv(out, pkt, proc_info),
+        OutputFormat::Json => write_json(out, pkt, proc_info),
+        OutputFormat::Text => write_text(out, pkt, proc_info),
     };
     match result {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(e),
@@ -217,24 +236,25 @@ fn write_text(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>
 }
 
 fn write_csv(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
-    // Escape info field for CSV (may contain commas)
-    let info_escaped = pkt.info.replace('"', "\"\"");
     writeln!(
         out,
-        "{},{:.6},{},{},{},{},\"{}\",{}",
+        "{},{:.6},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\"",
         pkt.index + 1,
         pkt.timestamp,
-        pkt.source,
-        pkt.destination,
-        pkt.protocol,
+        csv_escape(&pkt.source),
+        csv_escape(&pkt.destination),
+        csv_escape(&pkt.protocol.to_string()),
         pkt.original_length,
-        info_escaped,
-        proc_info.unwrap_or(""),
+        csv_escape(&pkt.info),
+        csv_escape(proc_info.unwrap_or("")),
     )
 }
 
+fn csv_escape(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
 fn write_json(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
-    // Manual JSON to avoid serde_json::to_string overhead per packet
     write!(
         out,
         "{{\"no\":{},\"time\":{:.6},\"src\":\"{}\",\"dst\":\"{}\",\"proto\":\"{}\",\"len\":{}",
@@ -242,10 +262,9 @@ fn write_json(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>
         pkt.timestamp,
         escape_json(&pkt.source),
         escape_json(&pkt.destination),
-        pkt.protocol,
+        escape_json(&pkt.protocol.to_string()),
         pkt.original_length,
     )?;
-    // Info field needs escaping (may contain quotes, backslashes)
     write!(out, ",\"info\":\"{}\"", escape_json(&pkt.info))?;
     if let Some(p) = proc_info {
         write!(out, ",\"process\":\"{}\"", escape_json(p))?;
@@ -263,7 +282,8 @@ fn escape_json(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                use std::fmt::Write as FmtWrite;
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
         }

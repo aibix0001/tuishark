@@ -439,6 +439,7 @@ impl App {
         self.interface_name = Some(interface.to_string());
         self.auto_scroll = self.config.display.auto_scroll;
         self.status_message = None;
+        self.zoomed_pane = None;
         // Restore trace state for live capture
         if self.trace_engine.is_some() {
             self.trace_state = TraceState::Active;
@@ -767,70 +768,78 @@ impl App {
         frame.render_widget(filter_bar, layout.filter_bar);
 
         // Packet table -- virtual scroll: only render visible rows
-        let visible_packets = self.get_visible_packets();
-        let table = PacketTable::new(
-            &visible_packets,
-            self.selected_packet,
-            &self.theme,
-            self.active_pane == Pane::PacketTable,
-            &self.config.columns,
-            self.config.display.timestamp_format,
-            self.store.first_absolute_ts(),
-        );
-        frame.render_widget(table, layout.packet_table);
+        if layout.packet_table.height > 0 {
+            let visible_packets = self.get_visible_packets();
+            let table = PacketTable::new(
+                &visible_packets,
+                self.selected_packet,
+                &self.theme,
+                self.active_pane == Pane::PacketTable,
+                &self.config.columns,
+                self.config.display.timestamp_format,
+                self.store.first_absolute_ts(),
+            );
+            frame.render_widget(table, layout.packet_table);
+        }
 
         // Detail tree
         // Update visible rows from actual area (subtract 2 for borders)
         self.detail_visible_rows = layout.detail_tree.height.saturating_sub(2) as usize;
-        let detail_tree = DetailTree::new(
-            self.detail.as_ref(),
-            &self.expanded_layers,
-            self.selected_layer,
-            self.selected_field,
-            &self.theme,
-            self.active_pane == Pane::DetailTree,
-            self.detail_scroll_offset,
-        );
-        frame.render_widget(detail_tree, layout.detail_tree);
+        if layout.detail_tree.height > 0 {
+            let detail_tree = DetailTree::new(
+                self.detail.as_ref(),
+                &self.expanded_layers,
+                self.selected_layer,
+                self.selected_field,
+                &self.theme,
+                self.active_pane == Pane::DetailTree,
+                self.detail_scroll_offset,
+            );
+            frame.render_widget(detail_tree, layout.detail_tree);
+        }
 
         // Hex view
-        let hex_data = self
-            .selected_packet
-            .and_then(|idx| self.store.get_raw(idx));
-        let hex_view = HexView::new(
-            hex_data,
-            self.highlight_range,
-            &self.theme,
-            self.active_pane == Pane::HexView,
-            self.config.display.hex_uppercase,
-        );
-        frame.render_widget(hex_view, layout.bottom_left);
+        if layout.bottom_left.height > 0 {
+            let hex_data = self
+                .selected_packet
+                .and_then(|idx| self.store.get_raw(idx));
+            let hex_view = HexView::new(
+                hex_data,
+                self.highlight_range,
+                &self.theme,
+                self.active_pane == Pane::HexView,
+                self.config.display.hex_uppercase,
+            );
+            frame.render_widget(hex_view, layout.bottom_left);
+        }
 
         // Kernel trace (Phase 6)
-        let trace_info = self
-            .selected_packet
-            .and_then(|idx| self.trace_store.get(idx));
-        let kernel_path = self
-            .selected_packet
-            .and_then(|idx| self.path_store.get(idx));
-        let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
-        let mut trace_view = TraceView::new(
-            trace_info,
-            self.trace_state,
-            &self.theme,
-            self.active_pane == Pane::KernelTrace,
-        )
-        .with_kernel_path(kernel_path)
-        .with_path_trace_state(self.path_trace_state)
-        .with_events_lost(events_lost)
-        .with_scroll_offset(self.trace_scroll_offset);
-        // Only compute BPF map entry count when needed for diagnostics
-        if trace_info.is_none() && self.trace_state == TraceState::Active {
-            if let Some(ref mut engine) = self.trace_engine {
-                trace_view = trace_view.with_map_entries(engine.map_entry_count());
+        if layout.bottom_right.height > 0 {
+            let trace_info = self
+                .selected_packet
+                .and_then(|idx| self.trace_store.get(idx));
+            let kernel_path = self
+                .selected_packet
+                .and_then(|idx| self.path_store.get(idx));
+            let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
+            let mut trace_view = TraceView::new(
+                trace_info,
+                self.trace_state,
+                &self.theme,
+                self.active_pane == Pane::KernelTrace,
+            )
+            .with_kernel_path(kernel_path)
+            .with_path_trace_state(self.path_trace_state)
+            .with_events_lost(events_lost)
+            .with_scroll_offset(self.trace_scroll_offset);
+            // Only compute BPF map entry count when needed for diagnostics
+            if trace_info.is_none() && self.trace_state == TraceState::Active {
+                if let Some(ref mut engine) = self.trace_engine {
+                    trace_view = trace_view.with_map_entries(engine.map_entry_count());
+                }
             }
+            frame.render_widget(trace_view, layout.bottom_right);
         }
-        frame.render_widget(trace_view, layout.bottom_right);
 
         // Status bar
         let filter_match = self.filtered_indices.as_ref().map(|fi| (fi.len(), self.store.len()));
@@ -986,45 +995,27 @@ impl App {
                     return;
                 }
                 Action::NextPane => {
-                    self.active_pane = self.active_pane.next();
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(self.active_pane);
-                    }
+                    self.set_active_pane(self.active_pane.next());
                     return;
                 }
                 Action::PrevPane => {
-                    self.active_pane = self.active_pane.prev();
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(self.active_pane);
-                    }
+                    self.set_active_pane(self.active_pane.prev());
                     return;
                 }
                 Action::FocusPacketTable => {
-                    self.active_pane = Pane::PacketTable;
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(Pane::PacketTable);
-                    }
+                    self.set_active_pane(Pane::PacketTable);
                     return;
                 }
                 Action::FocusDetailTree => {
-                    self.active_pane = Pane::DetailTree;
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(Pane::DetailTree);
-                    }
+                    self.set_active_pane(Pane::DetailTree);
                     return;
                 }
                 Action::FocusHexView => {
-                    self.active_pane = Pane::HexView;
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(Pane::HexView);
-                    }
+                    self.set_active_pane(Pane::HexView);
                     return;
                 }
                 Action::FocusKernelTrace => {
-                    self.active_pane = Pane::KernelTrace;
-                    if self.zoomed_pane.is_some() {
-                        self.zoomed_pane = Some(Pane::KernelTrace);
-                    }
+                    self.set_active_pane(Pane::KernelTrace);
                     return;
                 }
                 Action::Save => {
@@ -1580,6 +1571,14 @@ impl App {
         }
     }
 
+    /// Switch the active pane, updating zoom target if currently zoomed.
+    fn set_active_pane(&mut self, pane: Pane) {
+        self.active_pane = pane;
+        if self.zoomed_pane.is_some() {
+            self.zoomed_pane = Some(pane);
+        }
+    }
+
     // --- Session management methods ---
 
     fn try_quit(&mut self) {
@@ -1685,6 +1684,7 @@ impl App {
         self.dissect_state = DissectState::Fast;
         self.capture_state = CaptureState::Idle;
         self.interface_name = None;
+        self.zoomed_pane = None;
         self.live_capture = None;
         self.clear_filter();
         self.trace_store.clear();

@@ -35,43 +35,17 @@ impl AppLayout {
         // and collapse all others to zero-height rects.
         if let Some(pane) = zoomed {
             let zero = Rect::new(content.x, content.y, content.width, 0);
-            return match pane {
-                Pane::PacketTable => Self {
-                    header,
-                    filter_bar,
-                    packet_table: content,
-                    detail_tree: zero,
-                    bottom_left: zero,
-                    bottom_right: zero,
-                    status_bar,
-                },
-                Pane::DetailTree => Self {
-                    header,
-                    filter_bar,
-                    packet_table: zero,
-                    detail_tree: content,
-                    bottom_left: zero,
-                    bottom_right: zero,
-                    status_bar,
-                },
-                Pane::HexView => Self {
-                    header,
-                    filter_bar,
-                    packet_table: zero,
-                    detail_tree: zero,
-                    bottom_left: content,
-                    bottom_right: zero,
-                    status_bar,
-                },
-                Pane::KernelTrace => Self {
-                    header,
-                    filter_bar,
-                    packet_table: zero,
-                    detail_tree: zero,
-                    bottom_left: zero,
-                    bottom_right: content,
-                    status_bar,
-                },
+            let (pt, dt, bl, br) = match pane {
+                Pane::PacketTable => (content, zero, zero, zero),
+                Pane::DetailTree => (zero, content, zero, zero),
+                Pane::HexView    => (zero, zero, content, zero),
+                Pane::KernelTrace => (zero, zero, zero, content),
+            };
+            return Self {
+                header, filter_bar,
+                packet_table: pt, detail_tree: dt,
+                bottom_left: bl, bottom_right: br,
+                status_bar,
             };
         }
 
@@ -102,5 +76,83 @@ impl AppLayout {
             bottom_right: bottom_chunks[1],
             status_bar,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    const AREA: Rect = Rect { x: 0, y: 0, width: 120, height: 40 };
+
+    #[test]
+    fn normal_layout_has_nonzero_panes() {
+        let layout = AppLayout::new(AREA, None);
+        assert_eq!(layout.header.height, 1);
+        assert_eq!(layout.filter_bar.height, 1);
+        assert_eq!(layout.status_bar.height, 1);
+        assert!(layout.packet_table.height > 0);
+        assert!(layout.detail_tree.height > 0);
+        assert!(layout.bottom_left.height > 0);
+        assert!(layout.bottom_right.height > 0);
+    }
+
+    #[test]
+    fn zoom_packet_table_fills_content() {
+        let layout = AppLayout::new(AREA, Some(Pane::PacketTable));
+        assert!(layout.packet_table.height > 0);
+        assert_eq!(layout.detail_tree.height, 0);
+        assert_eq!(layout.bottom_left.height, 0);
+        assert_eq!(layout.bottom_right.height, 0);
+    }
+
+    #[test]
+    fn zoom_detail_tree_fills_content() {
+        let layout = AppLayout::new(AREA, Some(Pane::DetailTree));
+        assert_eq!(layout.packet_table.height, 0);
+        assert!(layout.detail_tree.height > 0);
+        assert_eq!(layout.bottom_left.height, 0);
+        assert_eq!(layout.bottom_right.height, 0);
+    }
+
+    #[test]
+    fn zoom_hex_view_fills_content() {
+        let layout = AppLayout::new(AREA, Some(Pane::HexView));
+        assert_eq!(layout.packet_table.height, 0);
+        assert_eq!(layout.detail_tree.height, 0);
+        assert!(layout.bottom_left.height > 0);
+        assert_eq!(layout.bottom_right.height, 0);
+    }
+
+    #[test]
+    fn zoom_kernel_trace_fills_content() {
+        let layout = AppLayout::new(AREA, Some(Pane::KernelTrace));
+        assert_eq!(layout.packet_table.height, 0);
+        assert_eq!(layout.detail_tree.height, 0);
+        assert_eq!(layout.bottom_left.height, 0);
+        assert!(layout.bottom_right.height > 0);
+    }
+
+    #[test]
+    fn zoomed_pane_gets_full_content_height() {
+        let normal = AppLayout::new(AREA, None);
+        let zoomed = AppLayout::new(AREA, Some(Pane::PacketTable));
+        // Zoomed pane should be taller than the normal packet table
+        assert!(zoomed.packet_table.height > normal.packet_table.height);
+        // Zoomed height should equal the sum of all content pane heights
+        let normal_content = normal.packet_table.height
+            + normal.detail_tree.height
+            + normal.bottom_left.height;
+        assert_eq!(zoomed.packet_table.height, normal_content);
+    }
+
+    #[test]
+    fn chrome_unchanged_when_zoomed() {
+        let normal = AppLayout::new(AREA, None);
+        let zoomed = AppLayout::new(AREA, Some(Pane::PacketTable));
+        assert_eq!(normal.header, zoomed.header);
+        assert_eq!(normal.filter_bar, zoomed.filter_bar);
+        assert_eq!(normal.status_bar, zoomed.status_bar);
     }
 }

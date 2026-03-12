@@ -24,6 +24,8 @@ use crate::ui::dialogs::preset_picker::PresetPicker;
 use crate::ui::dialogs::quit_confirm::QuitConfirm;
 use crate::ui::dialogs::save_dialog::SaveDialog;
 use crate::ui::dialogs::export_dialog::ExportDialog;
+use crate::ui::dialogs::ipinfo_dialog::IpInfoDialog;
+use crate::ipinfo::lookup::{IpInfo, IpLookup, spawn_lookup};
 use crate::ui::layout::AppLayout;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::detail_tree::DetailTree;
@@ -193,6 +195,12 @@ pub struct App {
     preset_scroll_offset: usize,
     // Zoom state
     zoomed_pane: Option<Pane>,
+    // IP info dialog
+    show_ipinfo_dialog: bool,
+    ipinfo_src: Option<IpInfo>,
+    ipinfo_dst: Option<IpInfo>,
+    ipinfo_lookup: IpLookup,
+    ipinfo_rx: Vec<std::sync::mpsc::Receiver<(String, IpInfo)>>,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -363,6 +371,12 @@ impl App {
             preset_scroll_offset: 0,
             // Zoom state
             zoomed_pane: None,
+            // IP info dialog
+            show_ipinfo_dialog: false,
+            ipinfo_src: None,
+            ipinfo_dst: None,
+            ipinfo_lookup: IpLookup::new(),
+            ipinfo_rx: Vec::new(),
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -413,6 +427,9 @@ impl App {
 
             // Poll path trace perf buffer
             self.drain_path_events();
+
+            // Check for IP info lookup results
+            self.drain_ipinfo_results();
 
             terminal.draw(|frame| self.render(frame))?;
 
@@ -897,6 +914,13 @@ impl App {
                 &self.theme,
             );
             frame.render_widget(dialog, frame.area());
+        } else if self.show_ipinfo_dialog {
+            let dialog = IpInfoDialog::new(
+                self.ipinfo_src.as_ref(),
+                self.ipinfo_dst.as_ref(),
+                &self.theme,
+            );
+            frame.render_widget(dialog, frame.area());
         } else if self.show_export_dialog {
             let filtered_count = self.filtered_indices.as_ref().map(|idx| idx.len());
             let dialog = ExportDialog::new(
@@ -962,6 +986,10 @@ impl App {
         }
         if self.show_stats_dialog {
             self.handle_stats_key(key);
+            return;
+        }
+        if self.show_ipinfo_dialog {
+            self.handle_ipinfo_key(key);
             return;
         }
         if self.show_export_dialog {
@@ -1073,6 +1101,10 @@ impl App {
                 Action::Help => {
                     self.show_help_dialog = true;
                     self.help_scroll = 0;
+                    return;
+                }
+                Action::IpInfo => {
+                    self.open_ipinfo_dialog();
                     return;
                 }
                 Action::ZoomPane => {
@@ -2692,6 +2724,120 @@ impl App {
                 self.store.get_range(self.scroll_offset, self.visible_rows).to_vec()
             }
         }
+    }
+
+    fn open_ipinfo_dialog(&mut self) {
+        let Some(idx) = self.selected_packet else {
+            return;
+        };
+        let Some(summary) = self.store.get(idx) else {
+            return;
+        };
+
+        let src = summary.source.clone();
+        let dst = summary.destination.clone();
+
+        // Try to look up source IP
+        self.ipinfo_src = self.resolve_ipinfo(&src);
+        self.ipinfo_dst = self.resolve_ipinfo(&dst);
+        self.show_ipinfo_dialog = true;
+    }
+
+    /// Try to resolve IP info for an address. Returns Some for cached/special,
+    /// spawns a background lookup for public IPs and returns a pending placeholder.
+    fn resolve_ipinfo(&mut self, addr: &str) -> Option<IpInfo> {
+        // Try cache/special first (also returns None for non-IP strings like MACs)
+        if let Some(info) = self.ipinfo_lookup.lookup(addr) {
+            return Some(info);
+        }
+        // lookup() returned None — either not an IP or needs API lookup
+        if addr.parse::<std::net::IpAddr>().is_err() {
+            return None;
+        }
+        // Already being looked up? Just show pending
+        if self.ipinfo_lookup.is_in_flight(addr) {
+            return Some(IpInfo::pending(addr));
+        }
+        // Spawn background lookup
+        self.ipinfo_lookup.mark_in_flight(addr);
+        let rx = spawn_lookup(addr.to_string());
+        self.ipinfo_rx.push(rx);
+        Some(IpInfo::pending(addr))
+    }
+
+    fn drain_ipinfo_results(&mut self) {
+        // Collect completed results first, then retain only pending receivers
+        let mut results: Vec<(String, IpInfo)> = Vec::new();
+        self.ipinfo_rx.retain(|rx| {
+            match rx.try_recv() {
+                Ok(result) => {
+                    results.push(result);
+                    false // remove completed receiver
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true, // keep waiting
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => false, // thread died, remove
+            }
+        });
+
+        for (addr, info) in results {
+            self.ipinfo_lookup.insert(addr.clone(), info.clone());
+            if self.show_ipinfo_dialog {
+                if let Some(ref src) = self.ipinfo_src {
+                    if src.address == addr {
+                        self.ipinfo_src = Some(info.clone());
+                    }
+                }
+                if let Some(ref dst) = self.ipinfo_dst {
+                    if dst.address == addr {
+                        self.ipinfo_dst = Some(info);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_ipinfo_key(&mut self, key: KeyEvent) {
+        // Check configurable bindings first
+        if let Some(action) = self.key_bindings.action_for(&key) {
+            match action {
+                Action::Quit | Action::IpInfo => {
+                    self.show_ipinfo_dialog = false;
+                    return;
+                }
+                Action::NextPacket => {
+                    self.handle_packet_table_action(Action::MoveDown);
+                    self.refresh_ipinfo();
+                    return;
+                }
+                Action::PrevPacket => {
+                    self.handle_packet_table_action(Action::MoveUp);
+                    self.refresh_ipinfo();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Hardcoded Esc for close
+        if key.code == KeyCode::Esc {
+            self.show_ipinfo_dialog = false;
+        }
+    }
+
+    fn refresh_ipinfo(&mut self) {
+        let Some(idx) = self.selected_packet else {
+            self.ipinfo_src = None;
+            self.ipinfo_dst = None;
+            return;
+        };
+        let Some(summary) = self.store.get(idx) else {
+            self.ipinfo_src = None;
+            self.ipinfo_dst = None;
+            return;
+        };
+        let src = summary.source.clone();
+        let dst = summary.destination.clone();
+        self.ipinfo_src = self.resolve_ipinfo(&src);
+        self.ipinfo_dst = self.resolve_ipinfo(&dst);
     }
 }
 

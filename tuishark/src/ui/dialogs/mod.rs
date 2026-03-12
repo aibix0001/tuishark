@@ -1,6 +1,7 @@
 pub mod export_dialog;
 pub mod help_dialog;
 pub mod interface_picker;
+pub mod ipinfo_dialog;
 pub mod open_dialog;
 pub mod preset_picker;
 pub mod quit_confirm;

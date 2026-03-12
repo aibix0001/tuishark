@@ -38,6 +38,7 @@ fn build_sections(keys: &KeyConfig) -> Vec<HelpSection<'_>> {
                 ("Filter", &keys.filter),
                 ("Filter presets", &keys.filter_presets),
                 ("Statistics", &keys.stats),
+                ("IP address info", &keys.ip_info),
                 ("Interface picker", &keys.interface_picker),
                 ("Stop capture", &keys.stop_capture),
                 ("Auto-scroll", &keys.toggle_auto_scroll),

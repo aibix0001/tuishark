@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_ktime_get_ns, bpf_probe_read_kernel},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_get_current_cgroup_id, bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_buf},
     macros::{kprobe, map},
     maps::{Array, LruHashMap, PerfEventArray},
     programs::ProbeContext,
@@ -44,6 +44,20 @@ struct PathEvent {
     _pad: [u8; 1],
 }
 
+/// Container context info — populated by path-tracing kprobes for container/netns enrichment.
+/// Must match the userspace ContainerInfo layout exactly.
+///
+/// Fields ordered to avoid implicit padding: u64 first, then u32s, then byte arrays.
+#[repr(C)]
+struct ContainerInfo {
+    cgroup_id: u64,
+    netns_inum: u32,
+    ifindex: u32,
+    dev_name: [u8; 16],
+    tcp_state: u8,
+    _pad: [u8; 7],
+}
+
 /// Filter for path tracing — written by userspace to narrow tracing to a specific flow.
 #[repr(C)]
 struct TraceFilter {
@@ -83,9 +97,27 @@ const AF_INET: u16 = 2;
 //   tcphdr/udphdr->source : offset 0, size 2 (network byte order)
 //   tcphdr/udphdr->dest   : offset 2, size 2 (network byte order)
 
+const SKB_OFF_DEV: usize = 16;
+const SKB_OFF_SK: usize = 24;
 const SKB_OFF_TRANSPORT_HEADER: usize = 182;
 const SKB_OFF_NETWORK_HEADER: usize = 184;
 const SKB_OFF_HEAD: usize = 200;
+
+// net_device struct offsets (Linux 6.19.3):
+//   net_device->ifindex  : offset 224, size 4 (int)
+//   net_device->nd_net   : offset 264, size 8 (possible_net_t containing struct net *)
+//   net_device->name     : offset 288, size 16 (char[16])
+const NETDEV_OFF_IFINDEX: usize = 224;
+const NETDEV_OFF_ND_NET: usize = 264;
+const NETDEV_OFF_NAME: usize = 288;
+
+// struct net -> ns_common offset, then ns_common->inum:
+//   net->ns     : offset 152 (struct ns_common)
+//   ns_common->inum : offset 24 (unsigned int)
+const NET_OFF_NS_INUM: usize = 152 + 24;
+
+// sock_common->skc_state : offset 18, size 1 (volatile unsigned char)
+const SKC_OFF_STATE: usize = 18;
 
 const IPHDR_OFF_PROTOCOL: usize = 9;
 const IPHDR_OFF_SADDR: usize = 12;
@@ -96,6 +128,10 @@ const IPHDR_OFF_DADDR: usize = 16;
 /// LRU hash map shared between all kprobes and userspace (existing process info).
 #[map]
 static FLOW_MAP: LruHashMap<FlowKey, ProcessInfo> = LruHashMap::with_max_entries(65536, 0);
+
+/// LRU hash map for container context (netns, device, TCP state, cgroup).
+#[map]
+static CONTAINER_MAP: LruHashMap<FlowKey, ContainerInfo> = LruHashMap::with_max_entries(65536, 0);
 
 /// Perf event array for streaming path events to userspace.
 #[map]
@@ -274,6 +310,65 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result
                 return Ok(());
             }
         }
+    }
+
+    // ─── Extract container context from sk_buff ────────────────────────
+    // Read sk_buff->dev (struct net_device *)
+    let dev_ptr: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_DEV) as *const *const u8)
+        .unwrap_or(core::ptr::null());
+
+    if !dev_ptr.is_null() {
+        // net_device->ifindex
+        let ifindex: u32 = bpf_probe_read_kernel(dev_ptr.add(NETDEV_OFF_IFINDEX) as *const u32)
+            .unwrap_or(0);
+
+        // net_device->name (char[16])
+        let mut dev_name = [0u8; 16];
+        let name_ptr = dev_ptr.add(NETDEV_OFF_NAME);
+        let _ = bpf_probe_read_kernel_buf(name_ptr, &mut dev_name);
+
+        // net_device->nd_net.net (struct net *)
+        let net_ptr: *const u8 = bpf_probe_read_kernel(
+            dev_ptr.add(NETDEV_OFF_ND_NET) as *const *const u8
+        ).unwrap_or(core::ptr::null());
+
+        let netns_inum: u32 = if !net_ptr.is_null() {
+            bpf_probe_read_kernel(net_ptr.add(NET_OFF_NS_INUM) as *const u32).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // TCP state: read from sk_buff->sk->__sk_common.skc_state
+        let sk_ptr: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_SK) as *const *const u8)
+            .unwrap_or(core::ptr::null());
+        let tcp_state: u8 = if !sk_ptr.is_null() && protocol == 6 {
+            bpf_probe_read_kernel(sk_ptr.add(SKC_OFF_STATE) as *const u8).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // cgroup ID from current task context
+        let cgroup_id = bpf_get_current_cgroup_id();
+
+        let container_info = ContainerInfo {
+            cgroup_id,
+            netns_inum,
+            ifindex,
+            dev_name,
+            tcp_state,
+            _pad: [0; 7],
+        };
+
+        let flow = FlowKey {
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            _pad: [0; 3],
+        };
+
+        let _ = CONTAINER_MAP.insert(&flow, &container_info, 0);
     }
 
     let event = PathEvent {

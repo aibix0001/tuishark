@@ -38,6 +38,7 @@ pub enum Action {
     Help,
     ZoomPane,
     IpInfo,
+    ContainerInfo,
 }
 
 /// Keyboard configuration section.
@@ -84,6 +85,7 @@ pub struct KeyConfig {
     pub next_packet: String,
     pub prev_packet: String,
     pub ip_info: String,
+    pub container_info: String,
 }
 
 impl Default for KeyConfig {
@@ -103,7 +105,7 @@ impl Default for KeyConfig {
             filter: "/".into(),
             export: "e".into(),
             stats: "Shift+S".into(),
-            interface_picker: "c".into(),
+            interface_picker: "n".into(),
             stop_capture: "Esc".into(),
             toggle_auto_scroll: "f".into(),
             filter_presets: "p".into(),
@@ -120,6 +122,7 @@ impl Default for KeyConfig {
             next_packet: "ä".into(),
             prev_packet: "ö".into(),
             ip_info: "i".into(),
+            container_info: "c".into(),
         }
     }
 }
@@ -167,6 +170,7 @@ impl KeyBindings {
             (Action::NextPacket, &config.next_packet, &defaults.next_packet),
             (Action::PrevPacket, &config.prev_packet, &defaults.prev_packet),
             (Action::IpInfo, &config.ip_info, &defaults.ip_info),
+            (Action::ContainerInfo, &config.container_info, &defaults.container_info),
         ];
 
         for &(action, user_str, default_str) in entries {

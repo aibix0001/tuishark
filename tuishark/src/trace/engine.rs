@@ -1,4 +1,4 @@
-use super::model::{FlowKey, ProcessInfo};
+use super::model::{ContainerInfo, FlowKey, ProcessInfo};
 use super::path_engine::PathTraceEngine;
 
 #[cfg(feature = "trace")]
@@ -101,6 +101,20 @@ impl TraceEngine {
         hash_map.get(&rev, 0).ok()
     }
 
+    /// Look up container context for a flow in the BPF map.
+    /// Tries the forward key first, then the reverse.
+    pub fn lookup_container(&mut self, key: &FlowKey) -> Option<ContainerInfo> {
+        let map = self.bpf.map_mut("CONTAINER_MAP")?;
+        let hash_map: BpfHashMap<_, FlowKey, ContainerInfo> = map.try_into().ok()?;
+
+        if let Ok(info) = hash_map.get(key, 0) {
+            return Some(info);
+        }
+
+        let rev = key.reverse();
+        hash_map.get(&rev, 0).ok()
+    }
+
     /// Attach path-tracing kprobes and open perf buffers.
     /// Returns a PathTraceEngine that can poll for path events.
     pub fn attach_path_engine(&mut self) -> Result<PathTraceEngine, String> {
@@ -140,6 +154,10 @@ impl TraceEngine {
     }
 
     pub fn lookup(&mut self, _key: &FlowKey) -> Option<ProcessInfo> {
+        None
+    }
+
+    pub fn lookup_container(&mut self, _key: &FlowKey) -> Option<ContainerInfo> {
         None
     }
 

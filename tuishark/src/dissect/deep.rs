@@ -355,6 +355,76 @@ mod tests {
         assert_eq!(ts_sec, u32::MAX);
     }
 
+    fn make_field(name: &str, value: &str) -> LayerField {
+        LayerField {
+            name: name.into(),
+            value: value.into(),
+            byte_range: None,
+        }
+    }
+
+    #[test]
+    fn descriptive_name_ipv4_with_fields() {
+        let fields = vec![
+            make_field("ip.src", "10.0.0.1"),
+            make_field("ip.dst", "10.0.0.2"),
+        ];
+        assert_eq!(
+            build_descriptive_layer_name("ip", &fields),
+            "IPv4, Src: 10.0.0.1, Dst: 10.0.0.2"
+        );
+    }
+
+    #[test]
+    fn descriptive_name_ipv4_missing_fields() {
+        assert_eq!(build_descriptive_layer_name("ip", &[]), "IPv4");
+    }
+
+    #[test]
+    fn descriptive_name_tcp_with_fields() {
+        let fields = vec![
+            make_field("tcp.srcport", "443"),
+            make_field("tcp.dstport", "12345"),
+        ];
+        assert_eq!(
+            build_descriptive_layer_name("tcp", &fields),
+            "TCP, Src Port: 443, Dst Port: 12345"
+        );
+    }
+
+    #[test]
+    fn descriptive_name_udp_missing_fields() {
+        assert_eq!(build_descriptive_layer_name("udp", &[]), "UDP");
+    }
+
+    #[test]
+    fn descriptive_name_eth_with_fields() {
+        let fields = vec![
+            make_field("eth.src", "aa:bb:cc:dd:ee:ff"),
+            make_field("eth.dst", "11:22:33:44:55:66"),
+        ];
+        assert_eq!(
+            build_descriptive_layer_name("eth", &fields),
+            "Ethernet II, Src: aa:bb:cc:dd:ee:ff, Dst: 11:22:33:44:55:66"
+        );
+    }
+
+    #[test]
+    fn descriptive_name_static_protocols() {
+        assert_eq!(build_descriptive_layer_name("arp", &[]), "ARP");
+        assert_eq!(build_descriptive_layer_name("icmp", &[]), "ICMPv4");
+        assert_eq!(build_descriptive_layer_name("icmpv6", &[]), "ICMPv6");
+        assert_eq!(build_descriptive_layer_name("dns", &[]), "DNS");
+        assert_eq!(build_descriptive_layer_name("http", &[]), "HTTP");
+        assert_eq!(build_descriptive_layer_name("tls", &[]), "TLS");
+        assert_eq!(build_descriptive_layer_name("ssl", &[]), "TLS");
+    }
+
+    #[test]
+    fn descriptive_name_unknown_protocol() {
+        assert_eq!(build_descriptive_layer_name("stp", &[]), "stp");
+    }
+
     #[test]
     fn tshark_check() {
         let _ = tshark_available();
@@ -417,11 +487,20 @@ mod tests {
         );
 
         let layer_names: Vec<&str> = detail.layers.iter().map(|l| l.name.as_str()).collect();
-        assert!(layer_names.contains(&"eth"), "Missing eth layer: {layer_names:?}");
-        assert!(layer_names.contains(&"ip"), "Missing ip layer: {layer_names:?}");
-        assert!(layer_names.contains(&"tcp"), "Missing tcp layer: {layer_names:?}");
+        assert!(
+            layer_names.iter().any(|n| n.starts_with("Ethernet II")),
+            "Missing Ethernet layer: {layer_names:?}"
+        );
+        assert!(
+            layer_names.iter().any(|n| n.starts_with("IPv4")),
+            "Missing IPv4 layer: {layer_names:?}"
+        );
+        assert!(
+            layer_names.iter().any(|n| n.starts_with("TCP")),
+            "Missing TCP layer: {layer_names:?}"
+        );
 
-        let eth_layer = detail.layers.iter().find(|l| l.name == "eth").unwrap();
+        let eth_layer = detail.layers.iter().find(|l| l.name.starts_with("Ethernet II")).unwrap();
         assert!(!eth_layer.fields.is_empty(), "eth layer should have fields");
         let has_byte_range = eth_layer.fields.iter().any(|f| f.byte_range.is_some());
         assert!(has_byte_range, "eth layer fields should have byte ranges");

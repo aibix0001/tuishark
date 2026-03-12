@@ -74,6 +74,17 @@ impl TraceEngine {
         let rev = key.reverse();
         hash_map.get(&rev, 0).ok()
     }
+
+    /// Return the number of entries currently in the BPF flow map.
+    pub fn map_entry_count(&mut self) -> usize {
+        let Some(map) = self.bpf.map_mut("FLOW_MAP") else {
+            return 0;
+        };
+        let Ok(hash_map): Result<BpfHashMap<_, FlowKey, ProcessInfo>, _> = map.try_into() else {
+            return 0;
+        };
+        hash_map.keys().count()
+    }
 }
 
 /// Stub engine when the trace feature is not compiled.
@@ -88,5 +99,9 @@ impl TraceEngine {
 
     pub fn lookup(&mut self, _key: &FlowKey) -> Option<ProcessInfo> {
         None
+    }
+
+    pub fn map_entry_count(&mut self) -> usize {
+        0
     }
 }

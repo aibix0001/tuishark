@@ -40,7 +40,11 @@ use crate::stats::model::StatsTab;
 use crate::stats::protocol::{self, ProtocolHierarchy};
 use crate::trace::engine::TraceEngine;
 use crate::trace::lookup::flow_key_from_summary;
-use crate::trace::model::TraceState;
+use crate::trace::model::{FlowKey, TraceState};
+use crate::trace::path_aggregator::PathAggregator;
+use crate::trace::path_engine::PathTraceEngine;
+use crate::trace::path_model::PathTraceState;
+use crate::trace::path_store::PathStore;
 use crate::trace::store::TraceStore;
 use crate::ui::dialogs::stats_dialog::StatsDialog;
 use crate::export::{ExportFormat, ExportStep};
@@ -157,6 +161,16 @@ pub struct App {
     trace_engine: Option<TraceEngine>,
     trace_store: TraceStore,
     trace_state: TraceState,
+    // Kernel path tracing (Phase 6b)
+    path_engine: Option<PathTraceEngine>,
+    path_store: PathStore,
+    path_aggregator: PathAggregator,
+    path_trace_state: PathTraceState,
+    enable_trace_path: bool,
+    trace_scroll_offset: usize,
+    /// Recent packet flow keys for path matching (packet_index, FlowKey).
+    /// Kept as a sliding window of the last N packets for matching.
+    recent_flow_keys: Vec<(usize, FlowKey)>,
     // Export dialog (Phase 8)
     show_export_dialog: bool,
     export_step: ExportStep,
@@ -201,6 +215,7 @@ impl App {
         interface: Option<String>,
         enable_deep: bool,
         enable_trace: bool,
+        enable_trace_path: bool,
         config: Config,
     ) -> Self {
         let dissect_worker = if enable_deep {
@@ -217,7 +232,7 @@ impl App {
 
         // Determine trace state and try to load eBPF engine
         let is_file_mode = file.is_some();
-        let (trace_engine, trace_state, trace_msg) = if is_file_mode {
+        let (mut trace_engine, trace_state, trace_msg) = if is_file_mode {
             (None, TraceState::FileMode, None)
         } else if !enable_trace {
             (None, TraceState::Disabled, None)
@@ -229,6 +244,23 @@ impl App {
                 }
             }
         };
+
+        // Attach path tracing if --trace-path and trace engine loaded
+        let (path_engine, path_trace_state, path_msg) = if enable_trace_path {
+            if let Some(ref mut engine) = trace_engine {
+                match engine.attach_path_engine() {
+                    Ok(pe) => (Some(pe), PathTraceState::Active, None),
+                    Err(e) => (None, PathTraceState::Inactive, Some(format!("Path tracing unavailable: {e}"))),
+                }
+            } else {
+                (None, PathTraceState::Inactive, None)
+            }
+        } else {
+            (None, PathTraceState::Inactive, None)
+        };
+
+        // Combine status messages
+        let trace_msg = trace_msg.or(path_msg);
 
         let key_bindings = KeyBindings::from_config(&config.keys);
         let theme = Theme::from_flavor(config.theme.flavor);
@@ -295,6 +327,14 @@ impl App {
             trace_engine,
             trace_store: TraceStore::default(),
             trace_state,
+            // Kernel path tracing
+            path_engine,
+            path_store: PathStore::default(),
+            path_aggregator: PathAggregator::new(),
+            path_trace_state,
+            enable_trace_path,
+            trace_scroll_offset: 0,
+            recent_flow_keys: Vec::new(),
             // Export dialog
             show_export_dialog: false,
             export_step: ExportStep::FormatSelect,
@@ -356,6 +396,9 @@ impl App {
 
             // Check for deep dissection results
             self.drain_deep_results();
+
+            // Poll path trace perf buffer
+            self.drain_path_events();
 
             terminal.draw(|frame| self.render(frame))?;
 
@@ -435,6 +478,17 @@ impl App {
                             if let Some(info) = engine.lookup(&flow_key) {
                                 self.trace_store.insert(pkt_index, info);
                             }
+                            // Path matching: try extracting a pending path immediately
+                            if self.path_trace_state != PathTraceState::Inactive {
+                                if let Some(path) = self.path_aggregator.try_extract_pending(&flow_key) {
+                                    self.path_store.insert(pkt_index, path);
+                                }
+                                self.recent_flow_keys.push((pkt_index, flow_key));
+                                // Keep sliding window of last 2000 entries
+                                if self.recent_flow_keys.len() > 2000 {
+                                    self.recent_flow_keys.drain(..1000);
+                                }
+                            }
                         }
                     }
                     self.store.add(summary, raw);
@@ -512,6 +566,30 @@ impl App {
             } else if let Some(err) = result.error {
                 self.dissect_state = DissectState::Fast;
                 self.status_message = Some(format!("Deep dissection failed: {err}"));
+            }
+        }
+    }
+
+    fn drain_path_events(&mut self) {
+        let Some(ref mut path_engine) = self.path_engine else {
+            return;
+        };
+
+        // Poll perf buffer for path events
+        let events = path_engine.poll();
+        if events.is_empty() {
+            return;
+        }
+
+        // Feed events to aggregator
+        self.path_aggregator.ingest(&events);
+
+        // Drain completed paths and match to packets
+        let completed = self.path_aggregator.drain_completed();
+        if !completed.is_empty() {
+            let matches = PathAggregator::match_to_packets(&completed, &self.recent_flow_keys);
+            for (pkt_idx, path) in matches {
+                self.path_store.insert(pkt_idx, path);
             }
         }
     }
@@ -721,12 +799,20 @@ impl App {
         let trace_info = self
             .selected_packet
             .and_then(|idx| self.trace_store.get(idx));
+        let kernel_path = self
+            .selected_packet
+            .and_then(|idx| self.path_store.get(idx));
+        let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
         let mut trace_view = TraceView::new(
             trace_info,
             self.trace_state,
             &self.theme,
             self.active_pane == Pane::KernelTrace,
-        );
+        )
+        .with_kernel_path(kernel_path)
+        .with_path_trace_state(self.path_trace_state)
+        .with_events_lost(events_lost)
+        .with_scroll_offset(self.trace_scroll_offset);
         // Only compute BPF map entry count when needed for diagnostics
         if trace_info.is_none() && self.trace_state == TraceState::Active {
             if let Some(ref mut engine) = self.trace_engine {
@@ -942,13 +1028,18 @@ impl App {
                     self.open_preset_picker();
                     return;
                 }
+                Action::TogglePathTrace => {
+                    self.toggle_path_trace();
+                    return;
+                }
                 // Navigation actions — dispatch to active pane
                 Action::MoveDown | Action::MoveUp | Action::MoveFirst | Action::MoveLast
                 | Action::PageDown | Action::PageUp | Action::ToggleExpand => {
                     match self.active_pane {
                         Pane::PacketTable => self.handle_packet_table_action(action),
                         Pane::DetailTree => self.handle_detail_tree_action(action),
-                        Pane::HexView | Pane::KernelTrace => {}
+                        Pane::KernelTrace => self.handle_trace_pane_action(action),
+                        Pane::HexView => {}
                     }
                     return;
                 }
@@ -1185,6 +1276,124 @@ impl App {
         }
     }
 
+    /// Toggle path tracing on/off.
+    ///
+    /// - With `--trace-path`: narrows/widens the BPF filter to the selected flow.
+    /// - With `--trace` only: attaches/detaches path kprobes on demand.
+    fn toggle_path_trace(&mut self) {
+        if self.trace_state != TraceState::Active {
+            self.status_message = Some("Path tracing requires --trace or --trace-path".into());
+            return;
+        }
+
+        match self.path_trace_state {
+            PathTraceState::Inactive => {
+                // Attach path kprobes on demand
+                if let Some(ref mut engine) = self.trace_engine {
+                    match engine.attach_path_engine() {
+                        Ok(pe) => {
+                            self.path_engine = Some(pe);
+                            // If a packet is selected, set filter to its flow
+                            if let Some(idx) = self.selected_packet {
+                                if let Some(summary) = self.store.get(idx) {
+                                    if let Some(fk) = flow_key_from_summary(summary) {
+                                        match engine.set_path_filter(&fk) {
+                                            Ok(()) => {
+                                                self.path_trace_state = PathTraceState::Filtered;
+                                                self.status_message = Some("Path tracing: filtered to selected flow".into());
+                                                return;
+                                            }
+                                            Err(e) => {
+                                                self.status_message = Some(format!("Path filter failed: {e}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            self.path_trace_state = PathTraceState::Active;
+                            self.status_message = Some("Path tracing: all flows".into());
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Path tracing failed: {e}"));
+                        }
+                    }
+                }
+            }
+            PathTraceState::Active if self.enable_trace_path => {
+                // --trace-path mode: narrow to selected flow
+                if let Some(idx) = self.selected_packet {
+                    if let Some(summary) = self.store.get(idx) {
+                        if let Some(fk) = flow_key_from_summary(summary) {
+                            if let Some(ref mut engine) = self.trace_engine {
+                                match engine.set_path_filter(&fk) {
+                                    Ok(()) => {
+                                        self.path_trace_state = PathTraceState::Filtered;
+                                        self.status_message = Some("Path tracing: filtered to selected flow".into());
+                                    }
+                                    Err(e) => {
+                                        self.status_message = Some(format!("Path filter failed: {e}"));
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+                self.status_message = Some("Select a TCP/UDP packet to filter path tracing".into());
+            }
+            PathTraceState::Filtered if self.enable_trace_path => {
+                // --trace-path mode: widen back to all flows
+                if let Some(ref mut engine) = self.trace_engine {
+                    match engine.clear_path_filter() {
+                        Ok(()) => {
+                            self.path_trace_state = PathTraceState::Active;
+                            self.status_message = Some("Path tracing: all flows".into());
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Path filter clear failed: {e}"));
+                        }
+                    }
+                }
+            }
+            PathTraceState::Active | PathTraceState::Filtered => {
+                // --trace mode (on-demand): detach — flush pending paths first
+                self.path_aggregator.flush();
+                let completed = self.path_aggregator.drain_completed();
+                if !completed.is_empty() {
+                    let matches = PathAggregator::match_to_packets(&completed, &self.recent_flow_keys);
+                    for (pkt_idx, path) in matches {
+                        self.path_store.insert(pkt_idx, path);
+                    }
+                }
+                self.path_engine = None;
+                self.path_trace_state = PathTraceState::Inactive;
+                self.status_message = Some("Path tracing disabled".into());
+            }
+        }
+    }
+
+    /// Handle navigation actions in the Kernel Trace pane (scroll the path list).
+    fn handle_trace_pane_action(&mut self, action: Action) {
+        match action {
+            Action::MoveDown => {
+                self.trace_scroll_offset = self.trace_scroll_offset.saturating_add(1);
+            }
+            Action::MoveUp => {
+                self.trace_scroll_offset = self.trace_scroll_offset.saturating_sub(1);
+            }
+            Action::PageDown => {
+                self.trace_scroll_offset = self.trace_scroll_offset.saturating_add(5);
+            }
+            Action::PageUp => {
+                self.trace_scroll_offset = self.trace_scroll_offset.saturating_sub(5);
+            }
+            Action::MoveFirst => {
+                self.trace_scroll_offset = 0;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_detail_tree_key(&mut self, key: KeyEvent) {
         let Some(detail) = &self.detail else {
             return;
@@ -1287,6 +1496,7 @@ impl App {
             self.selected_layer = if layer_count > 0 { Some(0) } else { None };
             self.selected_field = None;
             self.detail_scroll_offset = 0;
+            self.trace_scroll_offset = 0;
             self.dissect_state = DissectState::Fast;
             self.update_highlight();
 
@@ -1424,6 +1634,8 @@ impl App {
         self.live_capture = None;
         self.clear_filter();
         self.trace_store.clear();
+        self.path_store.clear();
+        self.recent_flow_keys.clear();
         self.trace_state = TraceState::FileMode;
         // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
 
@@ -2347,14 +2559,14 @@ mod tests {
 
     #[test]
     fn capture_state_default() {
-        let app = App::new(None, None, false, false, Config::default());
+        let app = App::new(None, None, false, false, false, Config::default());
         assert_eq!(app.capture_state, CaptureState::Idle);
         assert!(app.auto_scroll);
     }
 
     #[test]
     fn picker_scroll_adjusts() {
-        let mut app = App::new(None, None, false, false, Config::default());
+        let mut app = App::new(None, None, false, false, false, Config::default());
         app.picker_selected = 25;
         app.adjust_picker_scroll();
         assert!(app.picker_scroll_offset > 0);
@@ -2371,7 +2583,7 @@ mod tests {
 
     #[test]
     fn try_quit_with_empty_store() {
-        let mut app = App::new(None, None, false, false, Config::default());
+        let mut app = App::new(None, None, false, false, false, Config::default());
         app.try_quit();
         assert!(!app.running); // Should quit immediately
     }

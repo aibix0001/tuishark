@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long = "trace")]
     trace: bool,
 
+    /// Enable kernel packet path tracing (implies --trace)
+    #[arg(long = "trace-path")]
+    trace_path: bool,
+
     /// Run in CLI mode (print packets to stdout, no TUI)
     #[arg(long = "cli")]
     cli_mode: bool,
@@ -75,11 +79,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // --trace-path implies --trace
+    let enable_trace = cli.trace || cli.trace_path;
+
     if cli.cli_mode {
         return cli::run(
             cli.file,
             cli.interface,
-            cli.trace,
+            enable_trace,
+            cli.trace_path,
             cli.filter_expr,
             cli.output_format,
             cli.count,
@@ -104,7 +112,7 @@ fn main() -> Result<()> {
     let config = config::Config::load();
 
     let mut terminal = tui::init()?;
-    let result = app::App::new(cli.file, cli.interface, enable_deep, cli.trace, config).run(&mut terminal);
+    let result = app::App::new(cli.file, cli.interface, enable_deep, enable_trace, cli.trace_path, config).run(&mut terminal);
     tui::restore()?;
 
     result

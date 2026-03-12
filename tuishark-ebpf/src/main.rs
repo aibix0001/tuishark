@@ -2,9 +2,9 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_probe_read_kernel},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_get_current_comm, bpf_ktime_get_ns, bpf_probe_read_kernel},
     macros::{kprobe, map},
-    maps::LruHashMap,
+    maps::{Array, LruHashMap, PerfEventArray},
     programs::ProbeContext,
 };
 
@@ -27,11 +27,85 @@ struct ProcessInfo {
     comm: [u8; 16],
 }
 
+/// Path event — must match the userspace PathEvent layout exactly.
+/// Emitted by path-tracing kprobes to the PATH_EVENTS perf buffer.
+///
+/// Fields ordered to avoid implicit padding: u64s first, then u32s, then u16s, then u8.
+#[repr(C)]
+struct PathEvent {
+    skb_ptr: u64,
+    timestamp_ns: u64,
+    src_addr: u32,
+    dst_addr: u32,
+    func_id: u16,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    _pad: [u8; 1],
+}
+
+/// Filter for path tracing — written by userspace to narrow tracing to a specific flow.
+#[repr(C)]
+struct TraceFilter {
+    src_addr: u32,
+    dst_addr: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    active: u8,
+    _pad: [u8; 2],
+}
+
 const AF_INET: u16 = 2;
 
-/// LRU hash map shared between all kprobes and userspace.
+// ─── sk_buff struct offsets for Linux 6.x (x86_64/aarch64, 64-bit) ────────
+//
+// These are hardcoded offsets into `struct sk_buff`. They are stable across
+// the Linux 6.x series on 64-bit with typical distro configs.
+//
+// TODO: Migrate to CO-RE/BTF for kernel-version-independent access.
+//
+// Validated against pahole output for Linux 6.19.3:
+//   sk_buff->transport_header : offset 182, size 2 (__u16)
+//   sk_buff->network_header   : offset 184, size 2 (__u16)
+//   sk_buff->mac_header       : offset 186, size 2 (__u16)
+//   sk_buff->head             : offset 200, size 8 (unsigned char *)
+//
+// NOTE: These offsets vary across kernel versions. If path tracing produces
+// zero events, re-validate with: pahole -C sk_buff /sys/kernel/btf/vmlinux
+//
+// struct iphdr offsets (standard, all architectures):
+//   iphdr->protocol : offset 9, size 1
+//   iphdr->saddr    : offset 12, size 4
+//   iphdr->daddr    : offset 16, size 4
+//
+// TCP/UDP header (first 4 bytes are source/dest port on both):
+//   tcphdr/udphdr->source : offset 0, size 2 (network byte order)
+//   tcphdr/udphdr->dest   : offset 2, size 2 (network byte order)
+
+const SKB_OFF_TRANSPORT_HEADER: usize = 182;
+const SKB_OFF_NETWORK_HEADER: usize = 184;
+const SKB_OFF_HEAD: usize = 200;
+
+const IPHDR_OFF_PROTOCOL: usize = 9;
+const IPHDR_OFF_SADDR: usize = 12;
+const IPHDR_OFF_DADDR: usize = 16;
+
+// ─── BPF maps ──────────────────────────────────────────────────────────────
+
+/// LRU hash map shared between all kprobes and userspace (existing process info).
 #[map]
 static FLOW_MAP: LruHashMap<FlowKey, ProcessInfo> = LruHashMap::with_max_entries(65536, 0);
+
+/// Perf event array for streaming path events to userspace.
+#[map]
+static PATH_EVENTS: PerfEventArray<PathEvent> = PerfEventArray::new(0);
+
+/// Single-element array holding the active trace filter (written by userspace).
+#[map]
+static TRACE_FILTER: Array<TraceFilter> = Array::with_max_entries(1, 0);
+
+// ─── Existing process-info tracing (unchanged) ────────────────────────────
 
 /// Extract the 5-tuple from a `struct sock *` and store process info.
 /// The sock pointer is the first argument to tcp_sendmsg/tcp_recvmsg/udp_sendmsg/udp_recvmsg.
@@ -118,6 +192,149 @@ kprobe_handler!(trace_tcp_sendmsg, 6);
 kprobe_handler!(trace_tcp_recvmsg, 6);
 kprobe_handler!(trace_udp_sendmsg, 17);
 kprobe_handler!(trace_udp_recvmsg, 17);
+
+// ─── Path tracing: sk_buff extraction + event emission ────────────────────
+
+/// Extract 5-tuple from an `sk_buff *`, check against TRACE_FILTER,
+/// and emit a PathEvent to the PATH_EVENTS perf buffer.
+///
+/// `skb_arg` selects which kprobe argument holds the `sk_buff *` pointer:
+///   arg 0: netif_receive_skb, ip_rcv, ip_local_deliver, nf_hook_slow,
+///          tcp_v4_rcv, udp_rcv, ip_forward, dev_queue_xmit, dev_hard_start_xmit
+///   arg 1: nf_conntrack_in(priv, skb, state), tcp_rcv_established(sk, skb),
+///          tcp_data_queue(sk, skb), udp_queue_rcv_skb(sk, skb)
+///   arg 2: ip_rcv_finish(net, sk, skb), ip_local_deliver_finish(net, sk, skb),
+///          ip_output(net, sk, skb), ip_finish_output(net, sk, skb),
+///          ip_forward_finish(net, sk, skb)
+#[inline(always)]
+unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result<(), i64> {
+    let skb: *const u8 = ctx.arg(skb_arg).ok_or(1i64)?;
+
+    // Read sk_buff->head (pointer to linear data buffer)
+    let head: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_HEAD) as *const *const u8)?;
+
+    // Read sk_buff->network_header (u16 offset from head)
+    let net_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_NETWORK_HEADER) as *const u16)?;
+
+    // Read sk_buff->transport_header (u16 offset from head)
+    let trans_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_TRANSPORT_HEADER) as *const u16)?;
+
+    // Bail if headers not set (offset 0xFFFF means "not set" in the kernel)
+    if net_off == 0xFFFF {
+        return Ok(());
+    }
+
+    // Compute IP header pointer
+    let iphdr = head.add(net_off as usize);
+
+    // Check IP version nibble — only handle IPv4 (version 4)
+    let version_ihl: u8 = bpf_probe_read_kernel(iphdr as *const u8)?;
+    if (version_ihl >> 4) != 4 {
+        return Ok(());
+    }
+
+    // Read IP fields
+    let protocol: u8 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_PROTOCOL) as *const u8)?;
+    let src_addr: u32 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_SADDR) as *const u32)?;
+    let dst_addr: u32 = bpf_probe_read_kernel(iphdr.add(IPHDR_OFF_DADDR) as *const u32)?;
+
+    // Only trace TCP (6) and UDP (17)
+    if protocol != 6 && protocol != 17 {
+        return Ok(());
+    }
+
+    // Read ports from transport header (both TCP and UDP have ports at offset 0 and 2)
+    let (src_port, dst_port) = if trans_off != 0xFFFF {
+        let thdr = head.add(trans_off as usize);
+        let sp: u16 = bpf_probe_read_kernel(thdr as *const u16)?;
+        let dp: u16 = bpf_probe_read_kernel(thdr.add(2) as *const u16)?;
+        (u16::from_be(sp), u16::from_be(dp))
+    } else {
+        (0u16, 0u16)
+    };
+
+    // Check against TRACE_FILTER
+    if let Some(filter) = TRACE_FILTER.get(0) {
+        if filter.active != 0 {
+            // Filter is active — check if this packet matches.
+            // Match forward or reverse direction.
+            let fwd_match = src_addr == filter.src_addr
+                && dst_addr == filter.dst_addr
+                && src_port == filter.src_port
+                && dst_port == filter.dst_port
+                && protocol == filter.protocol;
+
+            let rev_match = src_addr == filter.dst_addr
+                && dst_addr == filter.src_addr
+                && src_port == filter.dst_port
+                && dst_port == filter.src_port
+                && protocol == filter.protocol;
+
+            if !fwd_match && !rev_match {
+                return Ok(());
+            }
+        }
+    }
+
+    let event = PathEvent {
+        skb_ptr: skb as u64,
+        timestamp_ns: bpf_ktime_get_ns(),
+        src_addr,
+        dst_addr,
+        func_id,
+        src_port,
+        dst_port,
+        protocol,
+        _pad: [0; 1],
+    };
+
+    PATH_EVENTS.output(ctx, &event, 0);
+
+    Ok(())
+}
+
+/// Macro for path-tracing kprobe handlers.
+/// Each handler calls handle_skb with the appropriate func_id and skb argument index.
+macro_rules! path_kprobe {
+    ($name:ident, $func_id:expr, $skb_arg:expr) => {
+        #[kprobe]
+        pub fn $name(ctx: ProbeContext) -> u32 {
+            match unsafe { handle_skb(&ctx, $func_id, $skb_arg) } {
+                Ok(()) | Err(_) => 0,
+            }
+        }
+    };
+}
+
+// Ingress — sk_buff * is arg 0
+path_kprobe!(path_netif_receive_skb, 0, 0);
+// __netif_receive_skb_core takes sk_buff **, not sk_buff * — skipped (func_id 1)
+path_kprobe!(path_ip_rcv, 2, 0);               // ip_rcv(skb, dev, pt, orig_dev)
+path_kprobe!(path_ip_rcv_finish, 3, 2);         // ip_rcv_finish(net, sk, skb)
+path_kprobe!(path_ip_local_deliver, 4, 0);      // ip_local_deliver(skb)
+path_kprobe!(path_ip_local_deliver_finish, 5, 2); // ip_local_deliver_finish(net, sk, skb)
+// Netfilter
+path_kprobe!(path_nf_hook_slow, 6, 0);          // nf_hook_slow(skb, state, ...)
+path_kprobe!(path_nf_conntrack_in, 7, 1);       // nf_conntrack_in(priv, skb, state)
+// TCP rx
+path_kprobe!(path_tcp_v4_rcv, 8, 0);            // tcp_v4_rcv(skb)
+path_kprobe!(path_tcp_rcv_established, 9, 1);   // tcp_rcv_established(sk, skb)
+path_kprobe!(path_tcp_data_queue, 10, 1);        // tcp_data_queue(sk, skb)
+// UDP rx
+path_kprobe!(path_udp_rcv, 11, 0);              // udp_rcv(skb)
+path_kprobe!(path_udp_queue_rcv_skb, 12, 1);    // udp_queue_rcv_skb(sk, skb)
+// Socket (13-14): sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff * — skipped.
+// TX socket layer (15-17): tcp_sendmsg, tcp_write_xmit, udp_sendmsg take struct sock *,
+// not sk_buff * — the sk_buff is created internally. Skipped.
+// IP out — sk_buff * is arg 2: fn(net, sk, skb)
+path_kprobe!(path_ip_output, 18, 2);            // ip_output(net, sk, skb)
+path_kprobe!(path_ip_finish_output, 19, 2);     // ip_finish_output(net, sk, skb)
+// Forward
+path_kprobe!(path_ip_forward, 20, 0);           // ip_forward(skb)
+path_kprobe!(path_ip_forward_finish, 21, 2);    // ip_forward_finish(net, sk, skb)
+// Egress — sk_buff * is arg 0
+path_kprobe!(path_dev_queue_xmit, 22, 0);       // dev_queue_xmit(skb)
+path_kprobe!(path_dev_hard_start_xmit, 23, 0);  // dev_hard_start_xmit(skb, dev, txq)
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

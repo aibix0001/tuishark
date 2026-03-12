@@ -49,6 +49,7 @@ sudo tuishark --cli capture.pcap --format csv > export.csv
 | `--format` | | Output format: `text`, `csv`, `json` | `text` |
 | `--count` | `-c` | Stop after N matching packets | unlimited |
 | `--trace` | | Enable eBPF process tracing | off |
+| `--trace-path` | | Enable kernel packet path tracing (implies `--trace`) | off |
 
 All existing flags (`-i`, `--no-deep`, `--list-interfaces`) remain available.
 
@@ -66,6 +67,12 @@ When `--trace` is active, a process tag is appended:
 
 ```
      1   0.000000 192.168.1.10                            10.0.0.1                                TCP         74 54321 > 443 [SYN] [1234:curl]
+```
+
+When `--trace-path` is active, the kernel traversal path is also shown:
+
+```
+     1   0.000000 127.0.0.1                               127.0.0.1                               TCP    110 ... [195698:code] path[13]: nf_hook_slow → ip_output(+6.6µs) → ... → tcp_v4_rcv(+31.1µs)
 ```
 
 ### csv

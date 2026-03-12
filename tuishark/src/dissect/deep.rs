@@ -215,7 +215,7 @@ fn map_rtshark_packet(packet: rtshark::Packet) -> PacketDetail {
     let mut layers = Vec::new();
 
     for layer in packet {
-        let layer_name = layer.name().to_string();
+        let raw_name = layer.name().to_string();
         let mut fields = Vec::new();
         for metadata in layer {
             let name = metadata.name().to_string();
@@ -235,6 +235,8 @@ fn map_rtshark_packet(packet: rtshark::Packet) -> PacketDetail {
             });
         }
 
+        let layer_name = build_descriptive_layer_name(&raw_name, &fields);
+
         layers.push(Layer {
             name: layer_name,
             fields,
@@ -242,6 +244,75 @@ fn map_rtshark_packet(packet: rtshark::Packet) -> PacketDetail {
     }
 
     PacketDetail { layers }
+}
+
+/// Build a descriptive layer name from tshark fields, matching the style
+/// used by fast dissection (e.g. "IPv4, Src: 1.2.3.4, Dst: 5.6.7.8").
+fn build_descriptive_layer_name(raw_name: &str, fields: &[LayerField]) -> String {
+    /// Look up a field value by its tshark field name.
+    fn field_val<'a>(fields: &'a [LayerField], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.value.as_str())
+    }
+
+    match raw_name {
+        "eth" => {
+            if let (Some(src), Some(dst)) =
+                (field_val(fields, "eth.src"), field_val(fields, "eth.dst"))
+            {
+                format!("Ethernet II, Src: {src}, Dst: {dst}")
+            } else {
+                "Ethernet II".into()
+            }
+        }
+        "ip" => {
+            if let (Some(src), Some(dst)) =
+                (field_val(fields, "ip.src"), field_val(fields, "ip.dst"))
+            {
+                format!("IPv4, Src: {src}, Dst: {dst}")
+            } else {
+                "IPv4".into()
+            }
+        }
+        "ipv6" => {
+            if let (Some(src), Some(dst)) =
+                (field_val(fields, "ipv6.src"), field_val(fields, "ipv6.dst"))
+            {
+                format!("IPv6, Src: {src}, Dst: {dst}")
+            } else {
+                "IPv6".into()
+            }
+        }
+        "tcp" => {
+            if let (Some(src), Some(dst)) = (
+                field_val(fields, "tcp.srcport"),
+                field_val(fields, "tcp.dstport"),
+            ) {
+                format!("TCP, Src Port: {src}, Dst Port: {dst}")
+            } else {
+                "TCP".into()
+            }
+        }
+        "udp" => {
+            if let (Some(src), Some(dst)) = (
+                field_val(fields, "udp.srcport"),
+                field_val(fields, "udp.dstport"),
+            ) {
+                format!("UDP, Src Port: {src}, Dst Port: {dst}")
+            } else {
+                "UDP".into()
+            }
+        }
+        "arp" => "ARP".into(),
+        "icmp" => "ICMPv4".into(),
+        "icmpv6" => "ICMPv6".into(),
+        "dns" => "DNS".into(),
+        "http" => "HTTP".into(),
+        "tls" | "ssl" => "TLS".into(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]

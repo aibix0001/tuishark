@@ -115,8 +115,8 @@ impl Default for KeyConfig {
             toggle_path_trace: "Shift+P".into(),
             help: "?".into(),
             zoom_pane: "z".into(),
-            next_packet: "Ctrl+Down".into(),
-            prev_packet: "Ctrl+Up".into(),
+            next_packet: "]".into(),
+            prev_packet: "[".into(),
         }
     }
 }
@@ -353,12 +353,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_arrow_maps_to_packet_nav() {
+    fn bracket_keys_map_to_packet_nav() {
         let config = KeyConfig::default();
         let bindings = KeyBindings::from_config(&config);
-        let ctrl_down = KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL);
-        let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
-        assert_eq!(bindings.action_for(&ctrl_down), Some(Action::NextPacket));
-        assert_eq!(bindings.action_for(&ctrl_up), Some(Action::PrevPacket));
+        let next = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
+        let prev = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
+        assert_eq!(bindings.action_for(&next), Some(Action::NextPacket));
+        assert_eq!(bindings.action_for(&prev), Some(Action::PrevPacket));
     }
 }

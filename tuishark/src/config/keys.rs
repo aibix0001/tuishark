@@ -33,6 +33,7 @@ pub enum Action {
     PageUp,
     ToggleExpand,
     TogglePathTrace,
+    Help,
 }
 
 /// Keyboard configuration section.
@@ -74,6 +75,7 @@ pub struct KeyConfig {
     pub page_up: String,
     pub toggle_expand: String,
     pub toggle_path_trace: String,
+    pub help: String,
 }
 
 impl Default for KeyConfig {
@@ -105,6 +107,7 @@ impl Default for KeyConfig {
             page_up: "PageUp".into(),
             toggle_expand: "Enter".into(),
             toggle_path_trace: "Shift+P".into(),
+            help: "?".into(),
         }
     }
 }
@@ -147,6 +150,7 @@ impl KeyBindings {
             (Action::PageUp, &config.page_up, &defaults.page_up),
             (Action::ToggleExpand, &config.toggle_expand, &defaults.toggle_expand),
             (Action::TogglePathTrace, &config.toggle_path_trace, &defaults.toggle_path_trace),
+            (Action::Help, &config.help, &defaults.help),
         ];
 
         for &(action, user_str, default_str) in entries {

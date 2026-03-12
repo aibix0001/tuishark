@@ -16,6 +16,7 @@ use crate::event::{Event, EventHandler};
 use crate::session::recent::RecentFiles;
 use crate::store::packet_store::PacketStore;
 use crate::tui::Tui;
+use crate::ui::dialogs::help_dialog::{HelpDialog, help_content_lines};
 use crate::ui::dialogs::interface_picker::InterfacePicker;
 use crate::ui::dialogs::open_dialog::{OpenDialog, OpenDialogMode};
 use crate::ui::dialogs::preset_picker::PresetPicker;
@@ -146,6 +147,8 @@ pub struct App {
     open_scroll_offset: usize,
     recent_files: RecentFiles,
     show_quit_confirm: bool,
+    show_help_dialog: bool,
+    help_scroll: usize,
     quit_after_save: bool,
     last_save_path: Option<PathBuf>,
     enable_deep: bool,
@@ -312,6 +315,8 @@ impl App {
             open_scroll_offset: 0,
             recent_files: RecentFiles::load(),
             show_quit_confirm: false,
+            show_help_dialog: false,
+            help_scroll: 0,
             quit_after_save: false,
             last_save_path: None,
             enable_deep,
@@ -834,8 +839,11 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Dialog overlays (priority order: quit > stats > export > save > open > preset > picker)
-        if self.show_quit_confirm {
+        // Dialog overlays (priority order: help > quit > stats > export > save > open > preset > picker)
+        if self.show_help_dialog {
+            let dialog = HelpDialog::new(&self.config.keys, self.help_scroll, &self.theme);
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_quit_confirm {
             let dialog = QuitConfirm::new(&self.theme);
             frame.render_widget(dialog, frame.area());
         } else if self.show_stats_dialog {
@@ -918,6 +926,10 @@ impl App {
         self.status_message = None;
 
         // Dialog mode routing (highest priority first)
+        if self.show_help_dialog {
+            self.handle_help_key(key);
+            return;
+        }
         if self.show_quit_confirm {
             self.handle_quit_confirm_key(key);
             return;
@@ -1030,6 +1042,11 @@ impl App {
                 }
                 Action::TogglePathTrace => {
                     self.toggle_path_trace();
+                    return;
+                }
+                Action::Help => {
+                    self.show_help_dialog = true;
+                    self.help_scroll = 0;
                     return;
                 }
                 // Navigation actions — dispatch to active pane
@@ -1843,6 +1860,36 @@ impl App {
             self.open_scroll_offset = self.open_selected_recent;
         } else if self.open_selected_recent >= self.open_scroll_offset + visible {
             self.open_scroll_offset = self.open_selected_recent.saturating_sub(visible - 1);
+        }
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        let total = help_content_lines(&self.config.keys);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.show_help_dialog = false;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.help_scroll + 1 < total {
+                    self.help_scroll += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.help_scroll = (self.help_scroll + 10).min(total.saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(10);
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.help_scroll = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.help_scroll = total.saturating_sub(1);
+            }
+            _ => {}
         }
     }
 

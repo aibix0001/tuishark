@@ -12,4 +12,7 @@ cargo +nightly build \
 
 cp target/bpfel-unknown-none/release/tuishark-ebpf ../tuishark/ebpf/tuishark-ebpf
 
-echo "eBPF binary built and copied to tuishark/ebpf/tuishark-ebpf"
+# Record the host architecture so the fallback path can validate at runtime
+uname -m > ../tuishark/ebpf/tuishark-ebpf.arch
+
+echo "eBPF binary built and copied to tuishark/ebpf/tuishark-ebpf (arch: $(uname -m))"

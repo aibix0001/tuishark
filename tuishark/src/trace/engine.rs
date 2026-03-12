@@ -22,6 +22,18 @@ impl TraceEngine {
     /// Load and attach eBPF programs.
     /// Returns Err if eBPF cannot be loaded (permissions, kernel, etc.).
     pub fn new() -> Result<Self, String> {
+        // Reject mismatched eBPF blobs at runtime. aya-ebpf bakes the host's
+        // pt_regs layout into ctx.arg() at compile time — a blob compiled for
+        // x86_64 silently reads the wrong register on aarch64 (and vice versa).
+        const EBPF_BLOB_ARCH: &str = env!("TUISHARK_EBPF_ARCH");
+        let host_arch = std::env::consts::ARCH;
+        if EBPF_BLOB_ARCH != "unknown" && EBPF_BLOB_ARCH != host_arch {
+            return Err(format!(
+                "eBPF blob was compiled for {EBPF_BLOB_ARCH} but running on {host_arch}. \
+                 Install nightly + bpf-linker and rebuild with: cargo build --features trace"
+            ));
+        }
+
         // Wrap include_bytes! in an aligned struct so the ELF parser gets
         // properly aligned data (object crate requires 8-byte alignment).
         #[repr(C, align(8))]

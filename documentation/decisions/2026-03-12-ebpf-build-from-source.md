@@ -5,7 +5,8 @@ author: agent
 status: active
 related_issues:
   - "#26"
-related_mrs: []
+related_mrs:
+  - "!26"
 ---
 
 ## Context
@@ -43,4 +44,9 @@ The precompiled blob and `build.sh` are retained for environments without nightl
 
 - Building with `--features trace` now requires nightly toolchain, rust-src component, and bpf-linker on the build machine (was previously only needed for eBPF development)
 - Build time increases slightly (eBPF compilation adds ~1s, cached rebuilds are fast)
-- The fallback path (precompiled blob) still has the cross-arch risk, but emits a clear warning
+- The fallback path (precompiled blob) records its target architecture in a sidecar file (`tuishark-ebpf.arch`). At runtime, `TraceEngine::new()` rejects mismatched blobs with an actionable error instead of failing silently.
+
+**Remaining risks:**
+
+- The hardcoded `sk_buff` struct offsets (transport_header=182, network_header=184, head=200) are validated against Linux 6.19.3. These may shift across major kernel versions or distro configs. Path tracing will silently produce zero events on kernels with different offsets. Migration to CO-RE/BTF (TODO in the eBPF source) is the long-term fix.
+- The `sock_common` offsets (0, 4, 12, 14, 16) have been stable since Linux 2.6 and are effectively ABI. Low risk.

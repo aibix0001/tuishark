@@ -1,5 +1,6 @@
 mod app;
 mod capture;
+mod cli;
 mod config;
 mod dissect;
 mod event;
@@ -39,6 +40,22 @@ struct Cli {
     /// Enable eBPF kernel tracing (requires root or CAP_BPF)
     #[arg(long = "trace")]
     trace: bool,
+
+    /// Run in CLI mode (print packets to stdout, no TUI)
+    #[arg(long = "cli")]
+    cli_mode: bool,
+
+    /// Display filter expression (CLI mode)
+    #[arg(short = 'f', long = "filter")]
+    filter_expr: Option<String>,
+
+    /// Output format for CLI mode: text, csv, json
+    #[arg(long = "format", default_value = "text")]
+    output_format: String,
+
+    /// Stop after N packets (CLI mode)
+    #[arg(short = 'c', long = "count")]
+    count: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -56,6 +73,17 @@ fn main() -> Result<()> {
             }
         }
         return Ok(());
+    }
+
+    if cli.cli_mode {
+        return cli::run(
+            cli.file,
+            cli.interface,
+            cli.trace,
+            cli.filter_expr,
+            &cli.output_format,
+            cli.count,
+        );
     }
 
     let original_hook = std::panic::take_hook();

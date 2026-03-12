@@ -87,6 +87,7 @@ fn main() -> Result<()> {
             cli.file,
             cli.interface,
             enable_trace,
+            cli.trace_path,
             cli.filter_expr,
             cli.output_format,
             cli.count,

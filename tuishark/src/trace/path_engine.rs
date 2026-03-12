@@ -37,28 +37,32 @@ impl PathTraceEngine {
     /// The mapping from eBPF program name to kernel function name and func_id.
     /// Matches the path_kprobe! macro invocations in the eBPF program.
     const PATH_PROBES: &[(&str, &str, u16)] = &[
+        // Ingress — sk_buff * is arg 0
         ("path_netif_receive_skb", "netif_receive_skb", 0),
-        ("path___netif_receive_skb_core", "__netif_receive_skb_core", 1),
+        // __netif_receive_skb_core takes sk_buff **, not sk_buff * — skipped (func_id 1)
         ("path_ip_rcv", "ip_rcv", 2),
-        ("path_ip_rcv_finish", "ip_rcv_finish", 3),
+        ("path_ip_rcv_finish", "ip_rcv_finish", 3),         // arg 2: (net, sk, skb)
         ("path_ip_local_deliver", "ip_local_deliver", 4),
-        ("path_ip_local_deliver_finish", "ip_local_deliver_finish", 5),
+        ("path_ip_local_deliver_finish", "ip_local_deliver_finish", 5), // arg 2
+        // Netfilter
         ("path_nf_hook_slow", "nf_hook_slow", 6),
-        ("path_nf_conntrack_in", "nf_conntrack_in", 7),
+        ("path_nf_conntrack_in", "nf_conntrack_in", 7),     // arg 1: (priv, skb, state)
+        // TCP rx
         ("path_tcp_v4_rcv", "tcp_v4_rcv", 8),
-        ("path_tcp_rcv_established", "tcp_rcv_established", 9),
-        ("path_tcp_data_queue", "tcp_data_queue", 10),
+        ("path_tcp_rcv_established", "tcp_rcv_established", 9),   // arg 1: (sk, skb)
+        ("path_tcp_data_queue", "tcp_data_queue", 10),            // arg 1: (sk, skb)
+        // UDP rx
         ("path_udp_rcv", "udp_rcv", 11),
-        ("path_udp_queue_rcv_skb", "udp_queue_rcv_skb", 12),
-        // sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff *; skipped.
-        // func_ids 13-14 reserved for future socket-layer handler.
-        ("path_tcp_sendmsg", "tcp_sendmsg", 15),
-        ("path_tcp_write_xmit", "tcp_write_xmit", 16),
-        ("path_udp_sendmsg", "udp_sendmsg", 17),
+        ("path_udp_queue_rcv_skb", "udp_queue_rcv_skb", 12),     // arg 1: (sk, skb)
+        // func_ids 13-14: sock_sendmsg/sock_recvmsg — skipped (struct socket *, not sk_buff *)
+        // func_ids 15-17: tcp_sendmsg/tcp_write_xmit/udp_sendmsg — skipped (struct sock *, no sk_buff)
+        // IP out — arg 2: (net, sk, skb)
         ("path_ip_output", "ip_output", 18),
         ("path_ip_finish_output", "ip_finish_output", 19),
+        // Forward
         ("path_ip_forward", "ip_forward", 20),
-        ("path_ip_forward_finish", "ip_forward_finish", 21),
+        ("path_ip_forward_finish", "ip_forward_finish", 21),     // arg 2
+        // Egress — arg 0
         ("path_dev_queue_xmit", "dev_queue_xmit", 22),
         ("path_dev_hard_start_xmit", "dev_hard_start_xmit", 23),
     ];

@@ -66,21 +66,22 @@ impl PathAggregator {
             entry.last_update = now;
         }
 
-        // Run expiry check periodically (every 200ms)
-        if now.duration_since(self.last_expiry).as_millis() >= 200 {
+        // Run expiry check periodically (every 20ms)
+        if now.duration_since(self.last_expiry).as_millis() >= 20 {
             self.expire_paths(now);
             self.last_expiry = now;
         }
     }
 
-    /// Expire pending paths that haven't received new events for >500ms.
+    /// Expire pending paths that haven't received new events for >50ms.
     /// These are considered complete (the packet has finished traversing).
-    /// 500ms allows for slow paths (netfilter, qdisc delays, ARP resolution).
+    /// Most kernel paths complete in microseconds; 50ms is generous enough for
+    /// slow paths (netfilter, qdisc delays) while keeping latency low.
     fn expire_paths(&mut self, now: Instant) {
         let mut expired_keys = Vec::new();
 
         for (&skb_ptr, pending) in &self.pending {
-            if now.duration_since(pending.last_update).as_millis() >= 500 {
+            if now.duration_since(pending.last_update).as_millis() >= 50 {
                 expired_keys.push(skb_ptr);
             }
         }
@@ -154,6 +155,43 @@ impl PathAggregator {
     /// Drain completed paths. Returns paths ready to be matched to packets.
     pub fn drain_completed(&mut self) -> Vec<PacketPath> {
         std::mem::take(&mut self.completed)
+    }
+
+    /// Try to extract a pending path matching a given flow key.
+    ///
+    /// When a packet is received, its path events may already be in the pending map
+    /// but not yet expired. This method finds the best-matching pending path (by 5-tuple)
+    /// and returns it immediately without waiting for expiry.
+    ///
+    /// This solves the timing gap where packets are printed before their paths expire.
+    pub fn try_extract_pending(&mut self, flow_key: &FlowKey) -> Option<PacketPath> {
+        let fwd = (flow_key.src_addr, flow_key.dst_addr, flow_key.src_port, flow_key.dst_port, flow_key.protocol);
+        let rev = (flow_key.dst_addr, flow_key.src_addr, flow_key.dst_port, flow_key.src_port, flow_key.protocol);
+
+        // Find the best matching pending path (most hops = most complete traversal)
+        let mut best_key: Option<u64> = None;
+        let mut best_hops = 0usize;
+
+        for (&skb_ptr, pending) in &self.pending {
+            if pending.events.is_empty() {
+                continue;
+            }
+            let first = &pending.events[0];
+            let evt_tuple = (first.src_addr, first.dst_addr, first.src_port, first.dst_port, first.protocol);
+            if evt_tuple == fwd || evt_tuple == rev {
+                if pending.events.len() > best_hops {
+                    best_hops = pending.events.len();
+                    best_key = Some(skb_ptr);
+                }
+            }
+        }
+
+        if let Some(skb_ptr) = best_key {
+            let pending = self.pending.remove(&skb_ptr)?;
+            Self::build_path(pending.events)
+        } else {
+            None
+        }
     }
 
     /// Force-flush all pending paths (e.g., when stopping tracing).

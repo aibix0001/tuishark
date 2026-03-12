@@ -65,11 +65,14 @@ const AF_INET: u16 = 2;
 //
 // TODO: Migrate to CO-RE/BTF for kernel-version-independent access.
 //
-// Validated against pahole output for Linux 6.8+ (typical distro config):
-//   sk_buff->transport_header : offset 184, size 2 (__u16)
-//   sk_buff->network_header   : offset 186, size 2 (__u16)
-//   sk_buff->mac_header       : offset 188, size 2 (__u16)
-//   sk_buff->head             : offset 224, size 8 (unsigned char *)
+// Validated against pahole output for Linux 6.19.3:
+//   sk_buff->transport_header : offset 182, size 2 (__u16)
+//   sk_buff->network_header   : offset 184, size 2 (__u16)
+//   sk_buff->mac_header       : offset 186, size 2 (__u16)
+//   sk_buff->head             : offset 200, size 8 (unsigned char *)
+//
+// NOTE: These offsets vary across kernel versions. If path tracing produces
+// zero events, re-validate with: pahole -C sk_buff /sys/kernel/btf/vmlinux
 //
 // struct iphdr offsets (standard, all architectures):
 //   iphdr->protocol : offset 9, size 1
@@ -80,9 +83,9 @@ const AF_INET: u16 = 2;
 //   tcphdr/udphdr->source : offset 0, size 2 (network byte order)
 //   tcphdr/udphdr->dest   : offset 2, size 2 (network byte order)
 
-const SKB_OFF_TRANSPORT_HEADER: usize = 184;
-const SKB_OFF_NETWORK_HEADER: usize = 186;
-const SKB_OFF_HEAD: usize = 224;
+const SKB_OFF_TRANSPORT_HEADER: usize = 182;
+const SKB_OFF_NETWORK_HEADER: usize = 184;
+const SKB_OFF_HEAD: usize = 200;
 
 const IPHDR_OFF_PROTOCOL: usize = 9;
 const IPHDR_OFF_SADDR: usize = 12;
@@ -195,11 +198,17 @@ kprobe_handler!(trace_udp_recvmsg, 17);
 /// Extract 5-tuple from an `sk_buff *`, check against TRACE_FILTER,
 /// and emit a PathEvent to the PATH_EVENTS perf buffer.
 ///
-/// The sk_buff pointer is the first argument to most networking kprobes.
-/// We read the network and transport headers from the sk_buff's linear data area.
+/// `skb_arg` selects which kprobe argument holds the `sk_buff *` pointer:
+///   arg 0: netif_receive_skb, ip_rcv, ip_local_deliver, nf_hook_slow,
+///          tcp_v4_rcv, udp_rcv, ip_forward, dev_queue_xmit, dev_hard_start_xmit
+///   arg 1: nf_conntrack_in(priv, skb, state), tcp_rcv_established(sk, skb),
+///          tcp_data_queue(sk, skb), udp_queue_rcv_skb(sk, skb)
+///   arg 2: ip_rcv_finish(net, sk, skb), ip_local_deliver_finish(net, sk, skb),
+///          ip_output(net, sk, skb), ip_finish_output(net, sk, skb),
+///          ip_forward_finish(net, sk, skb)
 #[inline(always)]
-unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16) -> Result<(), i64> {
-    let skb: *const u8 = ctx.arg(0).ok_or(1i64)?;
+unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result<(), i64> {
+    let skb: *const u8 = ctx.arg(skb_arg).ok_or(1i64)?;
 
     // Read sk_buff->head (pointer to linear data buffer)
     let head: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_HEAD) as *const *const u8)?;
@@ -285,51 +294,47 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16) -> Result<(), i64> {
 }
 
 /// Macro for path-tracing kprobe handlers.
-/// Each handler calls handle_skb with the appropriate func_id.
+/// Each handler calls handle_skb with the appropriate func_id and skb argument index.
 macro_rules! path_kprobe {
-    ($name:ident, $func_id:expr) => {
+    ($name:ident, $func_id:expr, $skb_arg:expr) => {
         #[kprobe]
         pub fn $name(ctx: ProbeContext) -> u32 {
-            match unsafe { handle_skb(&ctx, $func_id) } {
+            match unsafe { handle_skb(&ctx, $func_id, $skb_arg) } {
                 Ok(()) | Err(_) => 0,
             }
         }
     };
 }
 
-// Ingress
-path_kprobe!(path_netif_receive_skb, 0);
-path_kprobe!(path___netif_receive_skb_core, 1);
-path_kprobe!(path_ip_rcv, 2);
-path_kprobe!(path_ip_rcv_finish, 3);
-path_kprobe!(path_ip_local_deliver, 4);
-path_kprobe!(path_ip_local_deliver_finish, 5);
+// Ingress — sk_buff * is arg 0
+path_kprobe!(path_netif_receive_skb, 0, 0);
+// __netif_receive_skb_core takes sk_buff **, not sk_buff * — skipped (func_id 1)
+path_kprobe!(path_ip_rcv, 2, 0);               // ip_rcv(skb, dev, pt, orig_dev)
+path_kprobe!(path_ip_rcv_finish, 3, 2);         // ip_rcv_finish(net, sk, skb)
+path_kprobe!(path_ip_local_deliver, 4, 0);      // ip_local_deliver(skb)
+path_kprobe!(path_ip_local_deliver_finish, 5, 2); // ip_local_deliver_finish(net, sk, skb)
 // Netfilter
-path_kprobe!(path_nf_hook_slow, 6);
-path_kprobe!(path_nf_conntrack_in, 7);
+path_kprobe!(path_nf_hook_slow, 6, 0);          // nf_hook_slow(skb, state, ...)
+path_kprobe!(path_nf_conntrack_in, 7, 1);       // nf_conntrack_in(priv, skb, state)
 // TCP rx
-path_kprobe!(path_tcp_v4_rcv, 8);
-path_kprobe!(path_tcp_rcv_established, 9);
-path_kprobe!(path_tcp_data_queue, 10);
+path_kprobe!(path_tcp_v4_rcv, 8, 0);            // tcp_v4_rcv(skb)
+path_kprobe!(path_tcp_rcv_established, 9, 1);   // tcp_rcv_established(sk, skb)
+path_kprobe!(path_tcp_data_queue, 10, 1);        // tcp_data_queue(sk, skb)
 // UDP rx
-path_kprobe!(path_udp_rcv, 11);
-path_kprobe!(path_udp_queue_rcv_skb, 12);
-// Socket: sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff *,
-// so they cannot use handle_skb(). Skipped until a separate handler is written.
-// TCP tx
-path_kprobe!(path_tcp_sendmsg, 15);
-path_kprobe!(path_tcp_write_xmit, 16);
-// UDP tx
-path_kprobe!(path_udp_sendmsg, 17);
-// IP out
-path_kprobe!(path_ip_output, 18);
-path_kprobe!(path_ip_finish_output, 19);
+path_kprobe!(path_udp_rcv, 11, 0);              // udp_rcv(skb)
+path_kprobe!(path_udp_queue_rcv_skb, 12, 1);    // udp_queue_rcv_skb(sk, skb)
+// Socket (13-14): sock_sendmsg/sock_recvmsg take struct socket *, not sk_buff * — skipped.
+// TX socket layer (15-17): tcp_sendmsg, tcp_write_xmit, udp_sendmsg take struct sock *,
+// not sk_buff * — the sk_buff is created internally. Skipped.
+// IP out — sk_buff * is arg 2: fn(net, sk, skb)
+path_kprobe!(path_ip_output, 18, 2);            // ip_output(net, sk, skb)
+path_kprobe!(path_ip_finish_output, 19, 2);     // ip_finish_output(net, sk, skb)
 // Forward
-path_kprobe!(path_ip_forward, 20);
-path_kprobe!(path_ip_forward_finish, 21);
-// Egress
-path_kprobe!(path_dev_queue_xmit, 22);
-path_kprobe!(path_dev_hard_start_xmit, 23);
+path_kprobe!(path_ip_forward, 20, 0);           // ip_forward(skb)
+path_kprobe!(path_ip_forward_finish, 21, 2);    // ip_forward_finish(net, sk, skb)
+// Egress — sk_buff * is arg 0
+path_kprobe!(path_dev_queue_xmit, 22, 0);       // dev_queue_xmit(skb)
+path_kprobe!(path_dev_hard_start_xmit, 23, 0);  // dev_hard_start_xmit(skb, dev, txq)
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

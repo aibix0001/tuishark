@@ -478,8 +478,11 @@ impl App {
                             if let Some(info) = engine.lookup(&flow_key) {
                                 self.trace_store.insert(pkt_index, info);
                             }
-                            // Collect flow keys for path matching
+                            // Path matching: try extracting a pending path immediately
                             if self.path_trace_state != PathTraceState::Inactive {
+                                if let Some(path) = self.path_aggregator.try_extract_pending(&flow_key) {
+                                    self.path_store.insert(pkt_index, path);
+                                }
                                 self.recent_flow_keys.push((pkt_index, flow_key));
                                 // Keep sliding window of last 2000 entries
                                 if self.recent_flow_keys.len() > 2000 {

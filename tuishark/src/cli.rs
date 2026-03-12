@@ -2,6 +2,8 @@
 ///
 /// Supports live capture and pcap file reading with optional display filters,
 /// multiple output formats (text, csv, json/NDJSON), and eBPF process tracing.
+/// When `--trace-path` is active, polls perf buffers for kernel path events and
+/// prints the path alongside each matched packet.
 
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -18,6 +20,9 @@ use crate::dissect::model::PacketSummary;
 use crate::filter::{ast::Expr, eval, parser};
 use crate::trace::engine::TraceEngine;
 use crate::trace::lookup::flow_key_from_summary;
+use crate::trace::model::FlowKey;
+use crate::trace::path_aggregator::PathAggregator;
+use crate::trace::path_model::{PacketPath, FUNC_NAMES};
 
 /// Output format for CLI mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -49,6 +54,7 @@ pub fn run(
     file: Option<PathBuf>,
     interface: Option<String>,
     enable_trace: bool,
+    enable_trace_path: bool,
     filter_expr: Option<String>,
     output_format: OutputFormat,
     count: Option<usize>,
@@ -70,10 +76,30 @@ pub fn run(
         None
     };
 
+    // Attach path tracing engine if requested
+    let path_engine = if enable_trace_path {
+        if let Some(ref mut engine) = trace_engine {
+            match engine.attach_path_engine() {
+                Ok(pe) => {
+                    eprintln!("Kernel path tracing active.");
+                    Some(pe)
+                }
+                Err(e) => {
+                    eprintln!("Warning: path tracing unavailable: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if let Some(path) = file {
-        run_file(&path, filter.as_ref(), &mut trace_engine, output_format, count)
+        run_file(&path, filter.as_ref(), &mut trace_engine, path_engine, output_format, count)
     } else if let Some(iface) = interface {
-        run_live(&iface, filter.as_ref(), &mut trace_engine, output_format, count)
+        run_live(&iface, filter.as_ref(), &mut trace_engine, path_engine, output_format, count)
     } else {
         bail!("CLI mode requires either a pcap file or -i <interface>");
     }
@@ -83,6 +109,7 @@ fn run_file(
     path: &std::path::Path,
     filter: Option<&Expr>,
     trace_engine: &mut Option<TraceEngine>,
+    _path_engine: Option<crate::trace::path_engine::PathTraceEngine>,
     format: OutputFormat,
     count: Option<usize>,
 ) -> Result<()> {
@@ -108,7 +135,7 @@ fn run_file(
             }
         }
         let proc_info = lookup_process(trace_engine, summary);
-        if write_packet(&mut out, summary, proc_info.as_deref(), format).is_err() {
+        if write_packet(&mut out, summary, proc_info.as_deref(), None, format).is_err() {
             break; // broken pipe
         }
         printed += 1;
@@ -123,6 +150,7 @@ fn run_live(
     interface: &str,
     filter: Option<&Expr>,
     trace_engine: &mut Option<TraceEngine>,
+    mut path_engine: Option<crate::trace::path_engine::PathTraceEngine>,
     format: OutputFormat,
     count: Option<usize>,
 ) -> Result<()> {
@@ -133,11 +161,37 @@ fn run_live(
     write_header(&mut out, format)?;
 
     let mut printed = 0usize;
+    let mut path_aggregator = PathAggregator::new();
+    // Recent flow keys for path matching: (packet_index, FlowKey)
+    let mut recent_flow_keys: Vec<(usize, FlowKey)> = Vec::new();
+    // Matched paths: packet_index -> PacketPath
+    let mut matched_paths: std::collections::HashMap<usize, PacketPath> = std::collections::HashMap::new();
+    let mut total_path_events = 0u64;
+    let mut total_completed_paths = 0u64;
+    let mut total_path_matches = 0u64;
 
     while RUNNING.load(Ordering::SeqCst) {
         if let Some(max) = count {
             if printed >= max {
                 break;
+            }
+        }
+
+        // Poll path events from perf buffer
+        if let Some(ref mut pe) = path_engine {
+            let events = pe.poll();
+            if !events.is_empty() {
+                total_path_events += events.len() as u64;
+                path_aggregator.ingest(&events);
+            }
+            let completed = path_aggregator.drain_completed();
+            if !completed.is_empty() {
+                total_completed_paths += completed.len() as u64;
+                let matches = PathAggregator::match_to_packets(&completed, &recent_flow_keys);
+                total_path_matches += matches.len() as u64;
+                for (pkt_idx, path) in matches {
+                    matched_paths.insert(pkt_idx, path);
+                }
             }
         }
 
@@ -148,8 +202,35 @@ fn run_live(
                         continue;
                     }
                 }
+                let pkt_index = summary.index;
                 let proc_info = lookup_process(trace_engine, &summary);
-                if write_packet(&mut out, &summary, proc_info.as_deref(), format).is_err() {
+
+                // Try to extract a matching path directly from pending events.
+                // Path events arrive before or simultaneously with the captured packet,
+                // so we can often match immediately without waiting for expiry.
+                let flow_key = if path_engine.is_some() {
+                    flow_key_from_summary(&summary)
+                } else {
+                    None
+                };
+
+                let path = if let Some(ref fk) = flow_key {
+                    // First check previously matched paths, then try pending extraction
+                    matched_paths.remove(&pkt_index)
+                        .or_else(|| path_aggregator.try_extract_pending(fk))
+                } else {
+                    matched_paths.remove(&pkt_index)
+                };
+
+                // Store flow key for fallback matching of late-completing paths
+                if let Some(fk) = flow_key {
+                    recent_flow_keys.push((pkt_index, fk));
+                    if recent_flow_keys.len() > 2000 {
+                        recent_flow_keys.drain(..1000);
+                    }
+                }
+
+                if write_packet(&mut out, &summary, proc_info.as_deref(), path.as_ref(), format).is_err() {
                     break; // broken pipe
                 }
                 printed += 1;
@@ -166,6 +247,21 @@ fn run_live(
         }
     }
 
+    // Flush remaining path events
+    if let Some(ref mut pe) = path_engine {
+        let events = pe.poll();
+        if !events.is_empty() {
+            path_aggregator.ingest(&events);
+        }
+        path_aggregator.flush();
+        let completed = path_aggregator.drain_completed();
+        if !completed.is_empty() {
+            eprintln!("{} path(s) completed after capture ended (not matched to packets).", completed.len());
+        }
+        eprintln!("Path events: {} raw, {} completed paths, {} matched to packets, {} lost",
+            total_path_events, total_completed_paths, total_path_matches, pe.events_lost);
+    }
+
     capture.stop();
     let _ = out.flush();
     eprintln!("\n{printed} packets captured and displayed.");
@@ -179,6 +275,18 @@ fn lookup_process(engine: &mut Option<TraceEngine>, summary: &PacketSummary) -> 
     Some(format!("[{}:{}]", info.pid, info.comm_str()))
 }
 
+fn format_path(path: &PacketPath) -> String {
+    let hops: Vec<String> = path.hops.iter().map(|h| {
+        let name = FUNC_NAMES.get(h.func_id as usize).copied().unwrap_or("?");
+        if h.delta_ns == 0 {
+            name.to_string()
+        } else {
+            format!("{name}(+{:.1}µs)", h.delta_ns as f64 / 1000.0)
+        }
+    }).collect();
+    format!("path[{}]: {}", hops.len(), hops.join(" → "))
+}
+
 fn write_header(out: &mut impl Write, format: OutputFormat) -> io::Result<()> {
     match format {
         OutputFormat::Csv => writeln!(out, "No,Time,Source,Destination,Protocol,Length,Info,Process"),
@@ -190,12 +298,13 @@ fn write_packet(
     out: &mut impl Write,
     pkt: &PacketSummary,
     proc_info: Option<&str>,
+    path: Option<&PacketPath>,
     format: OutputFormat,
 ) -> io::Result<()> {
     let result = match format {
         OutputFormat::Csv => write_csv(out, pkt, proc_info),
-        OutputFormat::Json => write_json(out, pkt, proc_info),
-        OutputFormat::Text => write_text(out, pkt, proc_info),
+        OutputFormat::Json => write_json(out, pkt, proc_info, path),
+        OutputFormat::Text => write_text(out, pkt, proc_info, path),
     };
     match result {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(e),
@@ -207,32 +316,25 @@ fn write_packet(
     }
 }
 
-fn write_text(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
-    match proc_info {
-        Some(p) => writeln!(
-            out,
-            "{:>6} {:>10.6} {:<39} {:<39} {:<8} {:>6} {} {}",
-            pkt.index + 1,
-            pkt.timestamp,
-            pkt.source,
-            pkt.destination,
-            pkt.protocol,
-            pkt.original_length,
-            pkt.info,
-            p,
-        ),
-        None => writeln!(
-            out,
-            "{:>6} {:>10.6} {:<39} {:<39} {:<8} {:>6} {}",
-            pkt.index + 1,
-            pkt.timestamp,
-            pkt.source,
-            pkt.destination,
-            pkt.protocol,
-            pkt.original_length,
-            pkt.info,
-        ),
+fn write_text(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>, path: Option<&PacketPath>) -> io::Result<()> {
+    write!(
+        out,
+        "{:>6} {:>10.6} {:<39} {:<39} {:<8} {:>6} {}",
+        pkt.index + 1,
+        pkt.timestamp,
+        pkt.source,
+        pkt.destination,
+        pkt.protocol,
+        pkt.original_length,
+        pkt.info,
+    )?;
+    if let Some(p) = proc_info {
+        write!(out, " {p}")?;
     }
+    if let Some(path) = path {
+        write!(out, " {}", format_path(path))?;
+    }
+    writeln!(out)
 }
 
 fn write_csv(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
@@ -254,7 +356,7 @@ fn csv_escape(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-fn write_json(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
+fn write_json(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>, path: Option<&PacketPath>) -> io::Result<()> {
     write!(
         out,
         "{{\"no\":{},\"time\":{:.6},\"src\":\"{}\",\"dst\":\"{}\",\"proto\":\"{}\",\"len\":{}",
@@ -268,6 +370,9 @@ fn write_json(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>
     write!(out, ",\"info\":\"{}\"", escape_json(&pkt.info))?;
     if let Some(p) = proc_info {
         write!(out, ",\"process\":\"{}\"", escape_json(p))?;
+    }
+    if let Some(path) = path {
+        write!(out, ",\"path\":\"{}\"", escape_json(&format_path(path)))?;
     }
     writeln!(out, "}}")
 }

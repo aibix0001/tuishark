@@ -3,7 +3,7 @@ title: "TuiShark — Console-Based Packet Analyzer"
 date: 2026-03-10
 author: agent
 status: active
-related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15", "#19"]
+related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15", "#19", "#20"]
 related_mrs: ["!2", "!4", "!7"]
 ---
 
@@ -60,6 +60,7 @@ cargo build --release
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
 | `z` | Zoom / unzoom active pane (fills content area) |
+| `Ctrl+Down` / `Ctrl+Up` | Select next / previous packet (works in any pane, including zoomed) |
 | `p` | Open filter presets picker |
 | `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
 
@@ -292,6 +293,7 @@ When a display filter is active, only matching packets are exported by default. 
 
 ## Changelog
 
+- 2026-03-12: Global packet navigation — `Ctrl+Up`/`Ctrl+Down` select prev/next packet from any pane, including zoomed views (#20)
 - 2026-03-12: Pane zoom toggle — press `z` to zoom active pane, `z` again to restore layout (#19)
 - 2026-03-10: Phase 9 — configuration system: TOML config, themes, keybindings, filter presets, display preferences
 - 2026-03-10: Phase 8 — packet export: CSV, JSON, and plain text formats with filter-aware dialog

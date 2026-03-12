@@ -93,6 +93,8 @@ pub struct PathEvent {
 // Compile-time size assertion: 8+8+4+4+2+2+2+1+1 = 32 bytes (no implicit padding).
 const _: () = assert!(std::mem::size_of::<PathEvent>() == 32);
 
+// SAFETY: PathEvent is #[repr(C)] with only primitive fields (u64, u32, u16, u8, [u8; 1]).
+// No pointers, references, or interior mutability. Valid for any bit pattern.
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for PathEvent {}
 
@@ -109,6 +111,8 @@ pub struct TraceFilter {
     pub _pad: [u8; 2],
 }
 
+// SAFETY: TraceFilter is #[repr(C)] with only primitive fields (u32, u16, u8, [u8; 2]).
+// No pointers, references, or interior mutability. Valid for any bit pattern.
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for TraceFilter {}
 

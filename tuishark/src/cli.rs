@@ -22,7 +22,7 @@ use crate::trace::engine::TraceEngine;
 use crate::trace::lookup::flow_key_from_summary;
 use crate::trace::model::FlowKey;
 use crate::trace::path_aggregator::PathAggregator;
-use crate::trace::path_model::{PacketPath, FUNC_NAMES};
+use crate::trace::path_model::PacketPath;
 
 /// Output format for CLI mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -192,6 +192,10 @@ fn run_live(
                 for (pkt_idx, path) in matches {
                     matched_paths.insert(pkt_idx, path);
                 }
+                // Cap matched_paths to prevent unbounded growth from unmatched entries
+                if matched_paths.len() > 2000 {
+                    matched_paths.clear();
+                }
             }
         }
 
@@ -277,7 +281,7 @@ fn lookup_process(engine: &mut Option<TraceEngine>, summary: &PacketSummary) -> 
 
 fn format_path(path: &PacketPath) -> String {
     let hops: Vec<String> = path.hops.iter().map(|h| {
-        let name = FUNC_NAMES.get(h.func_id as usize).copied().unwrap_or("?");
+        let name = h.func_name();
         if h.delta_ns == 0 {
             name.to_string()
         } else {
@@ -289,7 +293,7 @@ fn format_path(path: &PacketPath) -> String {
 
 fn write_header(out: &mut impl Write, format: OutputFormat) -> io::Result<()> {
     match format {
-        OutputFormat::Csv => writeln!(out, "No,Time,Source,Destination,Protocol,Length,Info,Process"),
+        OutputFormat::Csv => writeln!(out, "No,Time,Source,Destination,Protocol,Length,Info,Process,Path"),
         _ => Ok(()), // text and json have no header
     }
 }
@@ -302,7 +306,7 @@ fn write_packet(
     format: OutputFormat,
 ) -> io::Result<()> {
     let result = match format {
-        OutputFormat::Csv => write_csv(out, pkt, proc_info),
+        OutputFormat::Csv => write_csv(out, pkt, proc_info, path),
         OutputFormat::Json => write_json(out, pkt, proc_info, path),
         OutputFormat::Text => write_text(out, pkt, proc_info, path),
     };
@@ -337,10 +341,10 @@ fn write_text(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>
     writeln!(out)
 }
 
-fn write_csv(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>) -> io::Result<()> {
+fn write_csv(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>, path: Option<&PacketPath>) -> io::Result<()> {
     writeln!(
         out,
-        "{},{:.6},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\"",
+        "{},{:.6},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\"",
         pkt.index + 1,
         pkt.timestamp,
         csv_escape(&pkt.source),
@@ -349,6 +353,7 @@ fn write_csv(out: &mut impl Write, pkt: &PacketSummary, proc_info: Option<&str>)
         pkt.original_length,
         csv_escape(&pkt.info),
         csv_escape(proc_info.unwrap_or("")),
+        csv_escape(&path.map(|p| format_path(p)).unwrap_or_default()),
     )
 }
 

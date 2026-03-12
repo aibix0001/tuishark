@@ -83,6 +83,8 @@ fn build_nav_lines<'a>(keys: &KeyConfig, key_style: Style, desc_style: Style) ->
         ("Page down", keys.page_down.clone()),
         ("Page up", keys.page_up.clone()),
         ("Expand/collapse", keys.toggle_expand.clone()),
+        ("Next packet (global)", keys.next_packet.clone()),
+        ("Prev packet (global)", keys.prev_packet.clone()),
     ];
     nav.into_iter().map(|(desc, key)| {
         Line::from(vec![
@@ -103,8 +105,8 @@ pub fn help_content_lines(keys: &KeyConfig) -> usize {
         lines += 1; // section header
         lines += section.entries.len();
     }
-    // Navigation section: separator + header + 7 entries
-    lines += 1 + 1 + 7;
+    // Navigation section: separator + header + 9 entries
+    lines += 1 + 1 + 9;
     lines
 }
 

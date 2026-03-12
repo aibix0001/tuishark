@@ -1077,6 +1077,14 @@ impl App {
                     }
                     return;
                 }
+                Action::NextPacket => {
+                    self.handle_packet_table_action(Action::MoveDown);
+                    return;
+                }
+                Action::PrevPacket => {
+                    self.handle_packet_table_action(Action::MoveUp);
+                    return;
+                }
                 // Navigation actions — dispatch to active pane
                 Action::MoveDown | Action::MoveUp | Action::MoveFirst | Action::MoveLast
                 | Action::PageDown | Action::PageUp | Action::ToggleExpand => {

@@ -35,6 +35,8 @@ pub enum Action {
     TogglePathTrace,
     Help,
     ZoomPane,
+    NextPacket,
+    PrevPacket,
 }
 
 /// Keyboard configuration section.
@@ -78,6 +80,8 @@ pub struct KeyConfig {
     pub toggle_path_trace: String,
     pub help: String,
     pub zoom_pane: String,
+    pub next_packet: String,
+    pub prev_packet: String,
 }
 
 impl Default for KeyConfig {
@@ -111,6 +115,8 @@ impl Default for KeyConfig {
             toggle_path_trace: "Shift+P".into(),
             help: "?".into(),
             zoom_pane: "z".into(),
+            next_packet: "Ctrl+Down".into(),
+            prev_packet: "Ctrl+Up".into(),
         }
     }
 }
@@ -155,6 +161,8 @@ impl KeyBindings {
             (Action::TogglePathTrace, &config.toggle_path_trace, &defaults.toggle_path_trace),
             (Action::Help, &config.help, &defaults.help),
             (Action::ZoomPane, &config.zoom_pane, &defaults.zoom_pane),
+            (Action::NextPacket, &config.next_packet, &defaults.next_packet),
+            (Action::PrevPacket, &config.prev_packet, &defaults.prev_packet),
         ];
 
         for &(action, user_str, default_str) in entries {

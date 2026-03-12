@@ -22,7 +22,13 @@ impl TraceEngine {
     /// Load and attach eBPF programs.
     /// Returns Err if eBPF cannot be loaded (permissions, kernel, etc.).
     pub fn new() -> Result<Self, String> {
-        let ebpf_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/tuishark-ebpf"));
+        // Wrap include_bytes! in an aligned struct so the ELF parser gets
+        // properly aligned data (object crate requires 8-byte alignment).
+        #[repr(C, align(8))]
+        struct Aligned<const N: usize>([u8; N]);
+        static EBPF_DATA: Aligned<{ include_bytes!(concat!(env!("OUT_DIR"), "/tuishark-ebpf")).len() }> =
+            Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/tuishark-ebpf")));
+        let ebpf_bytes = &EBPF_DATA.0;
 
         let mut bpf = Ebpf::load(ebpf_bytes).map_err(|e| format!("Failed to load eBPF: {e}"))?;
 

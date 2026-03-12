@@ -1321,21 +1321,10 @@ impl App {
             Action::ToggleExpand => {
                 if self.selected_field.is_none() {
                     if let Some(idx) = self.selected_layer {
-                        if idx < self.expanded_layers.len() {
-                            self.expanded_layers[idx] = !self.expanded_layers[idx];
-                            if let Some(ref detail) = self.detail {
-                                if let Some(layer) = detail.layers.get(idx) {
-                                    let key = Self::layer_key(&layer.name);
-                                    if self.expanded_layers[idx] {
-                                        self.collapsed_layers.remove(&key);
-                                    } else {
-                                        self.collapsed_layers.insert(key);
-                                    }
-                                }
-                            }
-                            if !self.expanded_layers[idx] {
-                                self.selected_field = None;
-                            }
+                        let expanded = !self.expanded_layers.get(idx).copied().unwrap_or(true);
+                        self.set_layer_expanded(idx, expanded);
+                        if !expanded {
+                            self.selected_field = None;
                         }
                     }
                 }
@@ -1534,21 +1523,41 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if self.selected_field.is_none() {
                     if let Some(idx) = self.selected_layer {
-                        if idx < self.expanded_layers.len() {
-                            self.expanded_layers[idx] = !self.expanded_layers[idx];
-                            if let Some(ref detail) = self.detail {
-                                if let Some(layer) = detail.layers.get(idx) {
-                                    let key = Self::layer_key(&layer.name);
-                                    if self.expanded_layers[idx] {
-                                        self.collapsed_layers.remove(&key);
-                                    } else {
-                                        self.collapsed_layers.insert(key);
-                                    }
-                                }
-                            }
-                            // Clear field selection when collapsing
-                            if !self.expanded_layers[idx] {
-                                self.selected_field = None;
+                        let expanded = !self.expanded_layers.get(idx).copied().unwrap_or(true);
+                        self.set_layer_expanded(idx, expanded);
+                        if !expanded {
+                            self.selected_field = None;
+                        }
+                    }
+                }
+                self.update_highlight();
+            }
+            KeyCode::Left => {
+                if let Some(idx) = self.selected_layer {
+                    if self.selected_field.is_some() {
+                        // On a field: jump back to the parent layer header
+                        self.selected_field = None;
+                    } else if self.expanded_layers.get(idx).copied().unwrap_or(false) {
+                        // On an expanded layer: collapse it
+                        self.set_layer_expanded(idx, false);
+                    }
+                }
+                self.update_highlight();
+            }
+            KeyCode::Right => {
+                if self.selected_field.is_none() {
+                    if let Some(idx) = self.selected_layer {
+                        if !self.expanded_layers.get(idx).copied().unwrap_or(true) {
+                            // On a collapsed layer: expand it
+                            self.set_layer_expanded(idx, true);
+                        } else {
+                            // Already expanded: enter first field
+                            let has_fields = self.detail.as_ref()
+                                .and_then(|d| d.layers.get(idx))
+                                .map(|l| !l.fields.is_empty())
+                                .unwrap_or(false);
+                            if has_fields {
+                                self.selected_field = Some(0);
                             }
                         }
                     }
@@ -1556,6 +1565,24 @@ impl App {
                 self.update_highlight();
             }
             _ => {}
+        }
+    }
+
+    /// Set a layer's expanded state and persist the change in `collapsed_layers`.
+    fn set_layer_expanded(&mut self, idx: usize, expanded: bool) {
+        if idx >= self.expanded_layers.len() {
+            return;
+        }
+        self.expanded_layers[idx] = expanded;
+        if let Some(ref detail) = self.detail {
+            if let Some(layer) = detail.layers.get(idx) {
+                let key = Self::layer_key(&layer.name);
+                if expanded {
+                    self.collapsed_layers.remove(&key);
+                } else {
+                    self.collapsed_layers.insert(key);
+                }
+            }
         }
     }
 

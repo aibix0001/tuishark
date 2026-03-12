@@ -857,6 +857,14 @@ impl App {
             let kernel_path = self
                 .selected_packet
                 .and_then(|idx| self.path_store.get(idx));
+            let container_info = self
+                .selected_packet
+                .and_then(|idx| self.container_store.get(idx));
+            let protocol = self.selected_packet
+                .and_then(|idx| self.store.get(idx))
+                .and_then(|s| flow_key_from_summary(s))
+                .map(|fk| fk.protocol)
+                .unwrap_or(0);
             let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
             let mut trace_view = TraceView::new(
                 trace_info,
@@ -864,6 +872,7 @@ impl App {
                 &self.theme,
                 self.active_pane == Pane::KernelTrace,
             )
+            .with_container_info(container_info, protocol)
             .with_kernel_path(kernel_path)
             .with_path_trace_state(self.path_trace_state)
             .with_events_lost(events_lost)

@@ -14,6 +14,7 @@ pub struct TraceView<'a> {
     trace_state: TraceState,
     theme: &'a Theme,
     is_focused: bool,
+    map_entries: usize,
 }
 
 impl<'a> TraceView<'a> {
@@ -28,7 +29,13 @@ impl<'a> TraceView<'a> {
             trace_state,
             theme,
             is_focused,
+            map_entries: 0,
         }
+    }
+
+    pub fn with_map_entries(mut self, count: usize) -> Self {
+        self.map_entries = count;
+        self
     }
 }
 
@@ -109,10 +116,16 @@ impl Widget for TraceView<'_> {
                         ]),
                     ]
                 } else {
-                    vec![Line::from(Span::styled(
-                        "No process info for this packet",
-                        Style::default().fg(self.theme.subtext0),
-                    ))]
+                    vec![
+                        Line::from(Span::styled(
+                            "No process info for this packet",
+                            Style::default().fg(self.theme.subtext0),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" BPF map entries: {}", self.map_entries),
+                            Style::default().fg(self.theme.surface2),
+                        )),
+                    ]
                 }
             }
         };

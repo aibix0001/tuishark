@@ -157,6 +157,7 @@ pub struct App {
     trace_engine: Option<TraceEngine>,
     trace_store: TraceStore,
     trace_state: TraceState,
+    trace_map_entries: usize,
     // Export dialog (Phase 8)
     show_export_dialog: bool,
     export_step: ExportStep,
@@ -295,6 +296,7 @@ impl App {
             trace_engine,
             trace_store: TraceStore::default(),
             trace_state,
+            trace_map_entries: 0,
             // Export dialog
             show_export_dialog: false,
             export_step: ExportStep::FormatSelect,
@@ -441,6 +443,12 @@ impl App {
                     new_packets = true;
                 }
                 None => break,
+            }
+        }
+
+        if new_packets {
+            if let Some(ref mut engine) = self.trace_engine {
+                self.trace_map_entries = engine.map_entry_count();
             }
         }
 
@@ -726,7 +734,8 @@ impl App {
             self.trace_state,
             &self.theme,
             self.active_pane == Pane::KernelTrace,
-        );
+        )
+        .with_map_entries(self.trace_map_entries);
         frame.render_widget(trace_view, layout.bottom_right);
 
         // Status bar

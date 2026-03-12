@@ -1,3 +1,4 @@
+pub mod container_dialog;
 pub mod export_dialog;
 pub mod help_dialog;
 pub mod interface_picker;

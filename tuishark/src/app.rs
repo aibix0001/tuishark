@@ -25,6 +25,7 @@ use crate::ui::dialogs::quit_confirm::QuitConfirm;
 use crate::ui::dialogs::save_dialog::SaveDialog;
 use crate::ui::dialogs::export_dialog::ExportDialog;
 use crate::ui::dialogs::ipinfo_dialog::IpInfoDialog;
+use crate::ui::dialogs::container_dialog::ContainerDialog;
 use crate::ipinfo::lookup::{IpInfo, IpLookup, spawn_lookup};
 use crate::ui::layout::AppLayout;
 use crate::ui::theme::Theme;
@@ -48,6 +49,7 @@ use crate::trace::model::{FlowKey, TraceState};
 use crate::trace::path_aggregator::PathAggregator;
 use crate::trace::path_engine::PathTraceEngine;
 use crate::trace::path_model::PathTraceState;
+use crate::trace::container_store::ContainerStore;
 use crate::trace::path_store::PathStore;
 use crate::trace::store::TraceStore;
 use crate::ui::dialogs::stats_dialog::StatsDialog;
@@ -201,6 +203,9 @@ pub struct App {
     ipinfo_dst: Option<IpInfo>,
     ipinfo_lookup: IpLookup,
     ipinfo_rx: Vec<std::sync::mpsc::Receiver<(String, IpInfo)>>,
+    // Container context dialog
+    show_container_dialog: bool,
+    container_store: ContainerStore,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -377,6 +382,9 @@ impl App {
             ipinfo_dst: None,
             ipinfo_lookup: IpLookup::new(),
             ipinfo_rx: Vec::new(),
+            // Container context dialog
+            show_container_dialog: false,
+            container_store: ContainerStore::default(),
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -512,6 +520,14 @@ impl App {
                             }
                             // Path matching: try extracting a pending path immediately
                             if self.path_trace_state != PathTraceState::Inactive {
+                                // Container info piggybacks on path-trace kprobes;
+                                // only query when path tracing is active.
+                                if let Some(cinfo) = engine.lookup_container(&flow_key) {
+                                    // Runtime canary: discard garbage from wrong kernel offsets
+                                    if cinfo.looks_valid() {
+                                        self.container_store.insert(pkt_index, cinfo);
+                                    }
+                                }
                                 if let Some(path) = self.path_aggregator.try_extract_pending(&flow_key) {
                                     self.path_store.insert(pkt_index, path);
                                 }
@@ -836,6 +852,13 @@ impl App {
             frame.render_widget(hex_view, layout.bottom_left);
         }
 
+        // Protocol for selected packet (used by trace view + container dialog)
+        let selected_protocol = self.selected_packet
+            .and_then(|idx| self.store.get(idx))
+            .and_then(|s| flow_key_from_summary(s))
+            .map(|fk| fk.protocol)
+            .unwrap_or(0);
+
         // Kernel trace (Phase 6)
         if layout.bottom_right.height > 0 {
             let trace_info = self
@@ -844,6 +867,9 @@ impl App {
             let kernel_path = self
                 .selected_packet
                 .and_then(|idx| self.path_store.get(idx));
+            let container_info = self
+                .selected_packet
+                .and_then(|idx| self.container_store.get(idx));
             let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
             let mut trace_view = TraceView::new(
                 trace_info,
@@ -851,6 +877,7 @@ impl App {
                 &self.theme,
                 self.active_pane == Pane::KernelTrace,
             )
+            .with_container_info(container_info, selected_protocol)
             .with_kernel_path(kernel_path)
             .with_path_trace_state(self.path_trace_state)
             .with_events_lost(events_lost)
@@ -878,7 +905,7 @@ impl App {
         );
         frame.render_widget(status, layout.status_bar);
 
-        // Dialog overlays (priority order: help > quit > stats > export > save > open > preset > picker)
+        // Dialog overlays (priority order: help > quit > stats > ipinfo > container > export > save > open > preset > picker)
         if self.show_help_dialog {
             // Compute content height for scroll clamping (dialog is 70% of area, minus chrome)
             let dialog_h = ((frame.area().height as u32 * 70 / 100) as u16).max(10);
@@ -918,6 +945,19 @@ impl App {
             let dialog = IpInfoDialog::new(
                 self.ipinfo_src.as_ref(),
                 self.ipinfo_dst.as_ref(),
+                &self.theme,
+            );
+            frame.render_widget(dialog, frame.area());
+        } else if self.show_container_dialog {
+            let container_info = self.selected_packet
+                .and_then(|idx| self.container_store.get(idx));
+            let trace_active = self.trace_state == TraceState::Active;
+            let path_trace_active = self.path_trace_state != PathTraceState::Inactive;
+            let dialog = ContainerDialog::new(
+                container_info,
+                selected_protocol,
+                trace_active,
+                path_trace_active,
                 &self.theme,
             );
             frame.render_widget(dialog, frame.area());
@@ -990,6 +1030,10 @@ impl App {
         }
         if self.show_ipinfo_dialog {
             self.handle_ipinfo_key(key);
+            return;
+        }
+        if self.show_container_dialog {
+            self.handle_container_key(key);
             return;
         }
         if self.show_export_dialog {
@@ -1105,6 +1149,10 @@ impl App {
                 }
                 Action::IpInfo => {
                     self.open_ipinfo_dialog();
+                    return;
+                }
+                Action::ContainerInfo => {
+                    self.open_container_dialog();
                     return;
                 }
                 Action::ZoomPane => {
@@ -1808,6 +1856,7 @@ impl App {
         self.clear_filter();
         self.trace_store.clear();
         self.path_store.clear();
+        self.container_store.clear();
         self.recent_flow_keys.clear();
         self.trace_state = TraceState::FileMode;
         // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
@@ -2838,6 +2887,36 @@ impl App {
         let dst = summary.destination.clone();
         self.ipinfo_src = self.resolve_ipinfo(&src);
         self.ipinfo_dst = self.resolve_ipinfo(&dst);
+    }
+
+    fn open_container_dialog(&mut self) {
+        if self.selected_packet.is_none() {
+            return;
+        }
+        self.show_container_dialog = true;
+    }
+
+    fn handle_container_key(&mut self, key: KeyEvent) {
+        if let Some(action) = self.key_bindings.action_for(&key) {
+            match action {
+                Action::Quit | Action::ContainerInfo => {
+                    self.show_container_dialog = false;
+                    return;
+                }
+                Action::NextPacket => {
+                    self.handle_packet_table_action(Action::MoveDown);
+                    return;
+                }
+                Action::PrevPacket => {
+                    self.handle_packet_table_action(Action::MoveUp);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if key.code == KeyCode::Esc {
+            self.show_container_dialog = false;
+        }
     }
 }
 

@@ -69,6 +69,7 @@ fn build_sections(keys: &KeyConfig) -> Vec<HelpSection<'_>> {
             title: "eBPF Tracing",
             entries: vec![
                 ("Toggle path trace", &keys.toggle_path_trace),
+                ("Container context", &keys.container_info),
             ],
         },
     ]

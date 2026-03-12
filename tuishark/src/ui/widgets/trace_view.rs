@@ -6,12 +6,15 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::trace::model::{ProcessInfo, TraceState};
+use crate::trace::model::{ContainerInfo, ProcessInfo, TraceState, INIT_NETNS_INUM};
 use crate::trace::path_model::{PacketPath, PathTraceState, Subsystem};
+use crate::ui::dialogs::container_dialog::tcp_state_style;
 use crate::ui::theme::Theme;
 
 pub struct TraceView<'a> {
     process_info: Option<&'a ProcessInfo>,
+    container_info: Option<&'a ContainerInfo>,
+    protocol: u8,
     kernel_path: Option<&'a PacketPath>,
     trace_state: TraceState,
     path_trace_state: PathTraceState,
@@ -31,6 +34,8 @@ impl<'a> TraceView<'a> {
     ) -> Self {
         Self {
             process_info,
+            container_info: None,
+            protocol: 0,
             kernel_path: None,
             trace_state,
             path_trace_state: PathTraceState::Inactive,
@@ -44,6 +49,12 @@ impl<'a> TraceView<'a> {
 
     pub fn with_map_entries(mut self, count: usize) -> Self {
         self.map_entries = count;
+        self
+    }
+
+    pub fn with_container_info(mut self, info: Option<&'a ContainerInfo>, protocol: u8) -> Self {
+        self.container_info = info;
+        self.protocol = protocol;
         self
     }
 
@@ -168,6 +179,65 @@ impl Widget for TraceView<'_> {
                             Style::default().fg(self.theme.surface2),
                         )));
                     }
+                }
+
+                // Container context section
+                if let Some(cinfo) = self.container_info {
+                    let label_style = Style::default()
+                        .fg(self.theme.subtext1)
+                        .add_modifier(Modifier::BOLD);
+
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat(area.width.saturating_sub(2) as usize),
+                        Style::default().fg(self.theme.surface1),
+                    )));
+
+                    // Device + NetNS on one line
+                    let netns_label = if cinfo.netns_inum == INIT_NETNS_INUM {
+                        "default".to_string()
+                    } else {
+                        cinfo.netns_inum.to_string()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(" Device:  ", label_style),
+                        Span::styled(
+                            format!("{} (#{})", cinfo.dev_name_str(), cinfo.ifindex),
+                            Style::default().fg(self.theme.text),
+                        ),
+                        Span::styled("    NetNS: ", label_style),
+                        Span::styled(
+                            netns_label,
+                            Style::default().fg(self.theme.text),
+                        ),
+                    ]));
+
+                    // TCP state + cgroup on one line
+                    let tcp_str = if self.protocol == 6 {
+                        cinfo.tcp_state_str()
+                    } else {
+                        "N/A"
+                    };
+                    let tcp_style = if self.protocol == 6 {
+                        tcp_state_style(cinfo.tcp_state, self.theme)
+                    } else {
+                        Style::default().fg(self.theme.subtext0)
+                    };
+
+                    let cgroup_str = if cinfo.cgroup_id == 0 {
+                        "N/A".to_string()
+                    } else {
+                        cinfo.cgroup_id.to_string()
+                    };
+
+                    lines.push(Line::from(vec![
+                        Span::styled(" TCP:     ", label_style),
+                        Span::styled(tcp_str, tcp_style),
+                        Span::styled("    cgroup: ", label_style),
+                        Span::styled(
+                            cgroup_str,
+                            Style::default().fg(self.theme.text),
+                        ),
+                    ]));
                 }
 
                 // Kernel path section

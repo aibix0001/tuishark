@@ -76,6 +76,94 @@ unsafe impl aya::Pod for FlowKey {}
 #[cfg(feature = "trace")]
 unsafe impl aya::Pod for ProcessInfo {}
 
+/// Default network namespace inode number on Linux (init_net).
+/// Used by UI code to label the default namespace.
+pub const INIT_NETNS_INUM: u32 = 4026531840;
+
+/// Container context from eBPF — network namespace, device, TCP state, cgroup.
+/// Must match the eBPF-side ContainerInfo layout exactly.
+///
+/// Fields ordered to avoid implicit padding: u64 first, then u32s, then byte arrays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct ContainerInfo {
+    pub cgroup_id: u64,
+    pub netns_inum: u32,
+    pub ifindex: u32,
+    pub dev_name: [u8; 16],
+    pub tcp_state: u8,
+    pub _pad: [u8; 7],
+}
+
+// Compile-time size assertion: 8+4+4+16+1+7 = 40 bytes.
+const _: () = assert!(std::mem::size_of::<ContainerInfo>() == 40);
+
+impl ContainerInfo {
+    /// Get the device name as a string (strips null bytes).
+    /// Returns "<unknown>" if the name is empty or contains non-printable bytes
+    /// (which can happen if kernel struct offsets are incorrect).
+    pub fn dev_name_str(&self) -> &str {
+        let len = self.dev_name.iter().position(|&b| b == 0).unwrap_or(16);
+        if len == 0 {
+            return "<unknown>";
+        }
+        let slice = &self.dev_name[..len];
+        // Sanity check: device names should be printable ASCII (is_ascii_graphic covers 0x21-0x7E)
+        if !slice.iter().all(|&b| b.is_ascii_graphic()) {
+            return "<unknown>";
+        }
+        std::str::from_utf8(slice).unwrap_or("<unknown>")
+    }
+
+    /// Runtime canary check: validates that kernel struct offsets produced sane data.
+    /// Returns false if values look like garbage (wrong net_device offsets, etc.).
+    pub fn looks_valid(&self) -> bool {
+        // ifindex should be > 0 if dev_ptr was valid
+        if self.ifindex == 0 {
+            return false;
+        }
+        // ifindex should be reasonable (Linux max is ~2^31 but practically < 65535)
+        if self.ifindex > 65535 {
+            return false;
+        }
+        // dev_name should contain at least one printable ASCII character
+        let name_len = self.dev_name.iter().position(|&b| b == 0).unwrap_or(16);
+        if name_len == 0 || !self.dev_name[..name_len].iter().all(|&b| b.is_ascii_graphic()) {
+            return false;
+        }
+        // tcp_state should be a valid enum value (0-12)
+        if self.tcp_state > 12 {
+            return false;
+        }
+        true
+    }
+
+    /// Get TCP state as a human-readable string.
+    pub fn tcp_state_str(&self) -> &'static str {
+        match self.tcp_state {
+            1 => "ESTABLISHED",
+            2 => "SYN_SENT",
+            3 => "SYN_RECV",
+            4 => "FIN_WAIT1",
+            5 => "FIN_WAIT2",
+            6 => "TIME_WAIT",
+            7 => "CLOSE",
+            8 => "CLOSE_WAIT",
+            9 => "LAST_ACK",
+            10 => "LISTEN",
+            11 => "CLOSING",
+            12 => "NEW_SYN_RECV",
+            0 => "N/A",
+            _ => "UNKNOWN",
+        }
+    }
+}
+
+// SAFETY: ContainerInfo is #[repr(C)] with only primitive fields (u64, u32, u32, [u8; 16], u8, [u8; 7]).
+// No pointers, references, or interior mutability. Valid for any bit pattern.
+#[cfg(feature = "trace")]
+unsafe impl aya::Pod for ContainerInfo {}
+
 /// Trace state for status display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceState {
@@ -185,5 +273,54 @@ mod tests {
             comm: *b"systemd-resolve\0",
         };
         assert_eq!(info.comm_str(), "systemd-resolve");
+    }
+
+    #[test]
+    fn container_info_dev_name_str() {
+        let mut info = ContainerInfo {
+            cgroup_id: 0,
+            netns_inum: 0,
+            ifindex: 2,
+            dev_name: [0u8; 16],
+            tcp_state: 0,
+            _pad: [0; 7],
+        };
+        info.dev_name[..4].copy_from_slice(b"eth0");
+        assert_eq!(info.dev_name_str(), "eth0");
+
+        // All-zero name returns "<unknown>"
+        let zero = ContainerInfo {
+            cgroup_id: 0, netns_inum: 0, ifindex: 0, dev_name: [0; 16],
+            tcp_state: 0, _pad: [0; 7],
+        };
+        assert_eq!(zero.dev_name_str(), "<unknown>");
+
+        // Garbage bytes (non-printable) returns "<unknown>"
+        let mut garbage = zero;
+        garbage.dev_name[0] = 0xFF;
+        garbage.dev_name[1] = 0x01;
+        assert_eq!(garbage.dev_name_str(), "<unknown>");
+    }
+
+    #[test]
+    fn container_info_tcp_states() {
+        let make = |state: u8| ContainerInfo {
+            cgroup_id: 0, netns_inum: 0, ifindex: 0, dev_name: [0; 16],
+            tcp_state: state, _pad: [0; 7],
+        };
+        assert_eq!(make(0).tcp_state_str(), "N/A");
+        assert_eq!(make(1).tcp_state_str(), "ESTABLISHED");
+        assert_eq!(make(2).tcp_state_str(), "SYN_SENT");
+        assert_eq!(make(3).tcp_state_str(), "SYN_RECV");
+        assert_eq!(make(4).tcp_state_str(), "FIN_WAIT1");
+        assert_eq!(make(5).tcp_state_str(), "FIN_WAIT2");
+        assert_eq!(make(6).tcp_state_str(), "TIME_WAIT");
+        assert_eq!(make(7).tcp_state_str(), "CLOSE");
+        assert_eq!(make(8).tcp_state_str(), "CLOSE_WAIT");
+        assert_eq!(make(9).tcp_state_str(), "LAST_ACK");
+        assert_eq!(make(10).tcp_state_str(), "LISTEN");
+        assert_eq!(make(11).tcp_state_str(), "CLOSING");
+        assert_eq!(make(12).tcp_state_str(), "NEW_SYN_RECV");
+        assert_eq!(make(255).tcp_state_str(), "UNKNOWN");
     }
 }

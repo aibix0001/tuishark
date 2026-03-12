@@ -1,4 +1,4 @@
-use super::model::{FlowKey, ProcessInfo};
+use super::model::{ContainerInfo, FlowKey, ProcessInfo};
 use super::path_engine::PathTraceEngine;
 
 #[cfg(feature = "trace")]
@@ -73,9 +73,12 @@ impl TraceEngine {
                 .map_err(|e| format!("Failed to attach kprobe to '{fn_name}': {e}"))?;
         }
 
-        // Verify the map exists at load time
+        // Verify the maps exist at load time
         if bpf.map_mut("FLOW_MAP").is_none() {
             return Err("FLOW_MAP not found in eBPF program".into());
+        }
+        if bpf.map_mut("CONTAINER_MAP").is_none() {
+            return Err("CONTAINER_MAP not found in eBPF program".into());
         }
 
         Ok(Self { bpf })
@@ -97,6 +100,20 @@ impl TraceEngine {
 
         // Try reverse (the packet may have been captured on the receive path,
         // so src/dst are swapped relative to the kprobe's perspective)
+        let rev = key.reverse();
+        hash_map.get(&rev, 0).ok()
+    }
+
+    /// Look up container context for a flow in the BPF map.
+    /// Tries the forward key first, then the reverse.
+    pub fn lookup_container(&mut self, key: &FlowKey) -> Option<ContainerInfo> {
+        let map = self.bpf.map_mut("CONTAINER_MAP")?;
+        let hash_map: BpfHashMap<_, FlowKey, ContainerInfo> = map.try_into().ok()?;
+
+        if let Ok(info) = hash_map.get(key, 0) {
+            return Some(info);
+        }
+
         let rev = key.reverse();
         hash_map.get(&rev, 0).ok()
     }
@@ -140,6 +157,10 @@ impl TraceEngine {
     }
 
     pub fn lookup(&mut self, _key: &FlowKey) -> Option<ProcessInfo> {
+        None
+    }
+
+    pub fn lookup_container(&mut self, _key: &FlowKey) -> Option<ContainerInfo> {
         None
     }
 

@@ -61,6 +61,7 @@ fn build_sections(keys: &KeyConfig) -> Vec<HelpSection<'_>> {
                 ("Detail tree", &keys.focus_detail_tree),
                 ("Hex view", &keys.focus_hex_view),
                 ("Kernel trace", &keys.focus_kernel_trace),
+                ("Zoom / unzoom", &keys.zoom_pane),
             ],
         },
         HelpSection {

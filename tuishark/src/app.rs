@@ -189,6 +189,8 @@ pub struct App {
     show_preset_picker: bool,
     preset_selected: usize,
     preset_scroll_offset: usize,
+    // Zoom state
+    zoomed_pane: Option<Pane>,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -356,6 +358,8 @@ impl App {
             show_preset_picker: false,
             preset_selected: 0,
             preset_scroll_offset: 0,
+            // Zoom state
+            zoomed_pane: None,
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -691,7 +695,7 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
-        let layout = AppLayout::new(frame.area());
+        let layout = AppLayout::new(frame.area(), self.zoomed_pane);
 
         // Update visible rows from actual terminal height
         self.visible_rows = layout.packet_table.height.saturating_sub(3) as usize;
@@ -837,6 +841,7 @@ impl App {
             self.dissect_state,
             self.status_message.as_deref(),
             filter_match,
+            self.zoomed_pane.is_some(),
             &self.theme,
         );
         frame.render_widget(status, layout.status_bar);
@@ -982,26 +987,44 @@ impl App {
                 }
                 Action::NextPane => {
                     self.active_pane = self.active_pane.next();
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(self.active_pane);
+                    }
                     return;
                 }
                 Action::PrevPane => {
                     self.active_pane = self.active_pane.prev();
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(self.active_pane);
+                    }
                     return;
                 }
                 Action::FocusPacketTable => {
                     self.active_pane = Pane::PacketTable;
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(Pane::PacketTable);
+                    }
                     return;
                 }
                 Action::FocusDetailTree => {
                     self.active_pane = Pane::DetailTree;
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(Pane::DetailTree);
+                    }
                     return;
                 }
                 Action::FocusHexView => {
                     self.active_pane = Pane::HexView;
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(Pane::HexView);
+                    }
                     return;
                 }
                 Action::FocusKernelTrace => {
                     self.active_pane = Pane::KernelTrace;
+                    if self.zoomed_pane.is_some() {
+                        self.zoomed_pane = Some(Pane::KernelTrace);
+                    }
                     return;
                 }
                 Action::Save => {
@@ -1053,6 +1076,14 @@ impl App {
                 Action::Help => {
                     self.show_help_dialog = true;
                     self.help_scroll = 0;
+                    return;
+                }
+                Action::ZoomPane => {
+                    if self.zoomed_pane == Some(self.active_pane) {
+                        self.zoomed_pane = None;
+                    } else {
+                        self.zoomed_pane = Some(self.active_pane);
+                    }
                     return;
                 }
                 // Navigation actions — dispatch to active pane

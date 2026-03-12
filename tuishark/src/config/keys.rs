@@ -34,6 +34,7 @@ pub enum Action {
     ToggleExpand,
     TogglePathTrace,
     Help,
+    ZoomPane,
 }
 
 /// Keyboard configuration section.
@@ -76,6 +77,7 @@ pub struct KeyConfig {
     pub toggle_expand: String,
     pub toggle_path_trace: String,
     pub help: String,
+    pub zoom_pane: String,
 }
 
 impl Default for KeyConfig {
@@ -108,6 +110,7 @@ impl Default for KeyConfig {
             toggle_expand: "Enter".into(),
             toggle_path_trace: "Shift+P".into(),
             help: "?".into(),
+            zoom_pane: "z".into(),
         }
     }
 }
@@ -151,6 +154,7 @@ impl KeyBindings {
             (Action::ToggleExpand, &config.toggle_expand, &defaults.toggle_expand),
             (Action::TogglePathTrace, &config.toggle_path_trace, &defaults.toggle_path_trace),
             (Action::Help, &config.help, &defaults.help),
+            (Action::ZoomPane, &config.zoom_pane, &defaults.zoom_pane),
         ];
 
         for &(action, user_str, default_str) in entries {

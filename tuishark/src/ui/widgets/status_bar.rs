@@ -16,6 +16,7 @@ pub struct StatusBar<'a> {
     dissect_state: DissectState,
     status_message: Option<&'a str>,
     filter_match: Option<(usize, usize)>, // (matched, total)
+    zoomed: bool,
     theme: &'a Theme,
 }
 
@@ -27,6 +28,7 @@ impl<'a> StatusBar<'a> {
         dissect_state: DissectState,
         status_message: Option<&'a str>,
         filter_match: Option<(usize, usize)>,
+        zoomed: bool,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -36,6 +38,7 @@ impl<'a> StatusBar<'a> {
             dissect_state,
             status_message,
             filter_match,
+            zoomed,
             theme,
         }
     }
@@ -122,6 +125,21 @@ impl Widget for StatusBar<'_> {
                 Style::default()
                     .fg(self.theme.base)
                     .bg(self.theme.green)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                " ",
+                Style::default().bg(self.theme.surface0),
+            ));
+        }
+
+        // Zoom indicator
+        if self.zoomed {
+            spans.push(Span::styled(
+                " ZOOM ",
+                Style::default()
+                    .fg(self.theme.base)
+                    .bg(self.theme.blue)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(

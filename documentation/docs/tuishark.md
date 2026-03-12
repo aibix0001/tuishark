@@ -4,7 +4,7 @@ date: 2026-03-10
 author: agent
 status: active
 related_issues: ["#1", "#2", "#3", "#4", "#7", "#8", "#10", "#12", "#14", "#15", "#19", "#20"]
-related_mrs: ["!2", "!4", "!7"]
+related_mrs: ["!2", "!4", "!7", "!18"]
 ---
 
 ## Overview

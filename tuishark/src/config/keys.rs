@@ -32,11 +32,11 @@ pub enum Action {
     PageDown,
     PageUp,
     ToggleExpand,
+    NextPacket,
+    PrevPacket,
     TogglePathTrace,
     Help,
     ZoomPane,
-    NextPacket,
-    PrevPacket,
 }
 
 /// Keyboard configuration section.
@@ -350,5 +350,15 @@ mod tests {
         let bindings = KeyBindings::from_config(&config);
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(bindings.action_for(&down), Some(Action::MoveDown));
+    }
+
+    #[test]
+    fn ctrl_arrow_maps_to_packet_nav() {
+        let config = KeyConfig::default();
+        let bindings = KeyBindings::from_config(&config);
+        let ctrl_down = KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL);
+        let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
+        assert_eq!(bindings.action_for(&ctrl_down), Some(Action::NextPacket));
+        assert_eq!(bindings.action_for(&ctrl_up), Some(Action::PrevPacket));
     }
 }

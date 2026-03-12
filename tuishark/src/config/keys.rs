@@ -115,8 +115,8 @@ impl Default for KeyConfig {
             toggle_path_trace: "Shift+P".into(),
             help: "?".into(),
             zoom_pane: "z".into(),
-            next_packet: "]".into(),
-            prev_packet: "[".into(),
+            next_packet: "ä".into(),
+            prev_packet: "ö".into(),
         }
     }
 }
@@ -353,11 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn bracket_keys_map_to_packet_nav() {
+    fn umlaut_keys_map_to_packet_nav() {
         let config = KeyConfig::default();
         let bindings = KeyBindings::from_config(&config);
-        let next = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
-        let prev = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
+        let next = KeyEvent::new(KeyCode::Char('ä'), KeyModifiers::NONE);
+        let prev = KeyEvent::new(KeyCode::Char('ö'), KeyModifiers::NONE);
         assert_eq!(bindings.action_for(&next), Some(Action::NextPacket));
         assert_eq!(bindings.action_for(&prev), Some(Action::PrevPacket));
     }

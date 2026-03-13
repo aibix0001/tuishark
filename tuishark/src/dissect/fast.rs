@@ -25,11 +25,12 @@ pub fn parse_packet_with_wire_len(
     let mut dst_port: Option<u16> = None;
     let mut link_meta: Option<LinkMeta> = None;
 
+    // For pflog/enc, parse the link header first; on failure, return early with Unknown protocol.
     let parsed_result = match link_type {
-        LinkType::Ethernet => SlicedPacket::from_ethernet(data),
-        LinkType::RawIp => SlicedPacket::from_ip(data),
-        LinkType::LinuxSll => SlicedPacket::from_linux_sll(data),
-        LinkType::Null => parse_null_loopback(data),
+        LinkType::Ethernet => Some(SlicedPacket::from_ethernet(data)),
+        LinkType::RawIp => Some(SlicedPacket::from_ip(data)),
+        LinkType::LinuxSll => Some(SlicedPacket::from_linux_sll(data)),
+        LinkType::Null => Some(parse_null_loopback(data)),
         LinkType::Pflog => {
             if let Some((meta, ip_data)) = parse_pflog_header(data) {
                 protocol = Protocol::Pflog;
@@ -38,17 +39,9 @@ pub fn parse_packet_with_wire_len(
                     meta.action, meta.direction, meta.ifname, meta.rule_number
                 );
                 link_meta = Some(LinkMeta::Pflog(meta));
-                SlicedPacket::from_ip(ip_data)
+                Some(SlicedPacket::from_ip(ip_data))
             } else {
-                Err(etherparse::err::packet::SliceError::Len(
-                    etherparse::err::LenError {
-                        required_len: 48,
-                        len: data.len(),
-                        len_source: etherparse::LenSource::Slice,
-                        layer: etherparse::err::Layer::Ethernet2Header,
-                        layer_start_offset: 0,
-                    },
-                ))
+                None // unparseable pflog header
             }
         }
         LinkType::Enc => {
@@ -59,27 +52,19 @@ pub fn parse_packet_with_wire_len(
                     meta.address_family, meta.spi, meta.flags
                 );
                 link_meta = Some(LinkMeta::Enc(meta));
-                SlicedPacket::from_ip(ip_data)
+                Some(SlicedPacket::from_ip(ip_data))
             } else {
-                Err(etherparse::err::packet::SliceError::Len(
-                    etherparse::err::LenError {
-                        required_len: 12,
-                        len: data.len(),
-                        len_source: etherparse::LenSource::Slice,
-                        layer: etherparse::err::Layer::Ethernet2Header,
-                        layer_start_offset: 0,
-                    },
-                ))
+                None // unparseable enc header
             }
         }
     };
 
-    if let Ok(parsed) = parsed_result {
+    if let Some(Ok(parsed)) = parsed_result {
         // Link layer (Ethernet only)
         if let Some(LinkSlice::Ethernet2(ref eth)) = parsed.link {
             source = format_mac(eth.source());
             destination = format_mac(eth.destination());
-            if protocol == Protocol::Unknown("???".into()) {
+            if matches!(protocol, Protocol::Unknown(_)) {
                 protocol = Protocol::Ethernet;
             }
         }
@@ -289,8 +274,8 @@ pub fn dissect_detail(data: &[u8], link_type: LinkType) -> PacketDetail {
             return detail;
         }
         LinkType::LinuxSll | LinkType::Ethernet => {
-            // handled below via etherparse
-            link_hdr_len = link_type.header_len();
+            // handled below via etherparse; both have fixed-size headers
+            link_hdr_len = link_type.header_len().unwrap();
         }
     }
 
@@ -344,97 +329,8 @@ pub fn dissect_detail(data: &[u8], link_type: LinkType) -> PacketDetail {
             });
         }
 
-        // IPv4/IPv6 layer
-        match &parsed.net {
-            Some(NetSlice::Ipv4(ipv4)) => {
-                let h = ipv4.header();
-                detail.layers.push(Layer {
-                    name: format!(
-                        "IPv4, Src: {}, Dst: {}",
-                        h.source_addr(),
-                        h.destination_addr()
-                    ),
-                    fields: vec![
-                        LayerField {
-                            name: "Version".into(),
-                            value: "4".into(),
-                            byte_range: Some((link_hdr_len, link_hdr_len + 1)),
-                        },
-                        LayerField {
-                            name: "Header Length".into(),
-                            value: format!("{} bytes", h.ihl() * 4),
-                            byte_range: Some((link_hdr_len, link_hdr_len + 1)),
-                        },
-                        LayerField {
-                            name: "Total Length".into(),
-                            value: format!("{}", h.total_len()),
-                            byte_range: Some((link_hdr_len + 2, link_hdr_len + 4)),
-                        },
-                        LayerField {
-                            name: "TTL".into(),
-                            value: format!("{}", h.ttl()),
-                            byte_range: Some((link_hdr_len + 8, link_hdr_len + 9)),
-                        },
-                        LayerField {
-                            name: "Protocol".into(),
-                            value: format!("{}", h.protocol().0),
-                            byte_range: Some((link_hdr_len + 9, link_hdr_len + 10)),
-                        },
-                        LayerField {
-                            name: "Source".into(),
-                            value: format!("{}", h.source_addr()),
-                            byte_range: Some((link_hdr_len + 12, link_hdr_len + 16)),
-                        },
-                        LayerField {
-                            name: "Destination".into(),
-                            value: format!("{}", h.destination_addr()),
-                            byte_range: Some((link_hdr_len + 16, link_hdr_len + 20)),
-                        },
-                    ],
-                });
-            }
-            Some(NetSlice::Ipv6(ipv6)) => {
-                let h = ipv6.header();
-                detail.layers.push(Layer {
-                    name: format!(
-                        "IPv6, Src: {}, Dst: {}",
-                        h.source_addr(),
-                        h.destination_addr()
-                    ),
-                    fields: vec![
-                        LayerField {
-                            name: "Version".into(),
-                            value: "6".into(),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Payload Length".into(),
-                            value: format!("{}", h.payload_length()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Hop Limit".into(),
-                            value: format!("{}", h.hop_limit()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Source".into(),
-                            value: format!("{}", h.source_addr()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Destination".into(),
-                            value: format!("{}", h.destination_addr()),
-                            byte_range: None,
-                        },
-                    ],
-                });
-            }
-            _ => {}
-        }
-
-        // Transport layer
-        dissect_transport(&mut detail, &parsed.transport);
+        // IP + transport layers (shared with non-Ethernet paths)
+        dissect_ip_layers_from_parsed(&mut detail, &parsed, link_hdr_len);
     }
 
     detail
@@ -504,7 +400,7 @@ pub fn parse_pflog_header(data: &[u8]) -> Option<(PflogMeta, &[u8])> {
             v => PfDirection::Unknown(v),
         }
     } else {
-        PfDirection::Unknown(0)
+        PfDirection::Unknown(0xFF) // header too short — direction unavailable
     };
 
     Some((
@@ -536,96 +432,102 @@ pub fn parse_enc_header(data: &[u8]) -> Option<(EncMeta, &[u8])> {
 /// Dissect IP layers from raw IP data, used by pflog/enc/null/raw link types.
 fn dissect_ip_layers(detail: &mut PacketDetail, ip_data: &[u8], base_offset: usize) {
     if let Ok(parsed) = SlicedPacket::from_ip(ip_data) {
-        match &parsed.net {
-            Some(NetSlice::Ipv4(ipv4)) => {
-                let h = ipv4.header();
-                detail.layers.push(Layer {
-                    name: format!(
-                        "IPv4, Src: {}, Dst: {}",
-                        h.source_addr(),
-                        h.destination_addr()
-                    ),
-                    fields: vec![
-                        LayerField {
-                            name: "Version".into(),
-                            value: "4".into(),
-                            byte_range: Some((base_offset, base_offset + 1)),
-                        },
-                        LayerField {
-                            name: "Header Length".into(),
-                            value: format!("{} bytes", h.ihl() * 4),
-                            byte_range: Some((base_offset, base_offset + 1)),
-                        },
-                        LayerField {
-                            name: "Total Length".into(),
-                            value: format!("{}", h.total_len()),
-                            byte_range: Some((base_offset + 2, base_offset + 4)),
-                        },
-                        LayerField {
-                            name: "TTL".into(),
-                            value: format!("{}", h.ttl()),
-                            byte_range: Some((base_offset + 8, base_offset + 9)),
-                        },
-                        LayerField {
-                            name: "Protocol".into(),
-                            value: format!("{}", h.protocol().0),
-                            byte_range: Some((base_offset + 9, base_offset + 10)),
-                        },
-                        LayerField {
-                            name: "Source".into(),
-                            value: format!("{}", h.source_addr()),
-                            byte_range: Some((base_offset + 12, base_offset + 16)),
-                        },
-                        LayerField {
-                            name: "Destination".into(),
-                            value: format!("{}", h.destination_addr()),
-                            byte_range: Some((base_offset + 16, base_offset + 20)),
-                        },
-                    ],
-                });
-            }
-            Some(NetSlice::Ipv6(ipv6)) => {
-                let h = ipv6.header();
-                detail.layers.push(Layer {
-                    name: format!(
-                        "IPv6, Src: {}, Dst: {}",
-                        h.source_addr(),
-                        h.destination_addr()
-                    ),
-                    fields: vec![
-                        LayerField {
-                            name: "Version".into(),
-                            value: "6".into(),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Payload Length".into(),
-                            value: format!("{}", h.payload_length()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Hop Limit".into(),
-                            value: format!("{}", h.hop_limit()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Source".into(),
-                            value: format!("{}", h.source_addr()),
-                            byte_range: None,
-                        },
-                        LayerField {
-                            name: "Destination".into(),
-                            value: format!("{}", h.destination_addr()),
-                            byte_range: None,
-                        },
-                    ],
-                });
-            }
-            _ => {}
-        }
-
-        dissect_transport(detail, &parsed.transport);
+        dissect_ip_layers_from_parsed(detail, &parsed, base_offset);
     }
+}
+
+/// Dissect IP + transport layers from an already-parsed SlicedPacket.
+/// Shared by both Ethernet/SLL and non-Ethernet paths.
+fn dissect_ip_layers_from_parsed(detail: &mut PacketDetail, parsed: &SlicedPacket<'_>, base_offset: usize) {
+    match &parsed.net {
+        Some(NetSlice::Ipv4(ipv4)) => {
+            let h = ipv4.header();
+            detail.layers.push(Layer {
+                name: format!(
+                    "IPv4, Src: {}, Dst: {}",
+                    h.source_addr(),
+                    h.destination_addr()
+                ),
+                fields: vec![
+                    LayerField {
+                        name: "Version".into(),
+                        value: "4".into(),
+                        byte_range: Some((base_offset, base_offset + 1)),
+                    },
+                    LayerField {
+                        name: "Header Length".into(),
+                        value: format!("{} bytes", h.ihl() * 4),
+                        byte_range: Some((base_offset, base_offset + 1)),
+                    },
+                    LayerField {
+                        name: "Total Length".into(),
+                        value: format!("{}", h.total_len()),
+                        byte_range: Some((base_offset + 2, base_offset + 4)),
+                    },
+                    LayerField {
+                        name: "TTL".into(),
+                        value: format!("{}", h.ttl()),
+                        byte_range: Some((base_offset + 8, base_offset + 9)),
+                    },
+                    LayerField {
+                        name: "Protocol".into(),
+                        value: format!("{}", h.protocol().0),
+                        byte_range: Some((base_offset + 9, base_offset + 10)),
+                    },
+                    LayerField {
+                        name: "Source".into(),
+                        value: format!("{}", h.source_addr()),
+                        byte_range: Some((base_offset + 12, base_offset + 16)),
+                    },
+                    LayerField {
+                        name: "Destination".into(),
+                        value: format!("{}", h.destination_addr()),
+                        byte_range: Some((base_offset + 16, base_offset + 20)),
+                    },
+                ],
+            });
+        }
+        Some(NetSlice::Ipv6(ipv6)) => {
+            let h = ipv6.header();
+            detail.layers.push(Layer {
+                name: format!(
+                    "IPv6, Src: {}, Dst: {}",
+                    h.source_addr(),
+                    h.destination_addr()
+                ),
+                fields: vec![
+                    LayerField {
+                        name: "Version".into(),
+                        value: "6".into(),
+                        byte_range: None,
+                    },
+                    LayerField {
+                        name: "Payload Length".into(),
+                        value: format!("{}", h.payload_length()),
+                        byte_range: None,
+                    },
+                    LayerField {
+                        name: "Hop Limit".into(),
+                        value: format!("{}", h.hop_limit()),
+                        byte_range: None,
+                    },
+                    LayerField {
+                        name: "Source".into(),
+                        value: format!("{}", h.source_addr()),
+                        byte_range: None,
+                    },
+                    LayerField {
+                        name: "Destination".into(),
+                        value: format!("{}", h.destination_addr()),
+                        byte_range: None,
+                    },
+                ],
+            });
+        }
+        _ => {}
+    }
+
+    dissect_transport(detail, &parsed.transport);
 }
 
 /// Dissect transport layer (shared between Ethernet and non-Ethernet paths).

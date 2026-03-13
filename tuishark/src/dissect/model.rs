@@ -37,15 +37,17 @@ impl LinkType {
         }
     }
 
-    /// Byte length of the link-layer header (0 for raw IP).
-    pub fn header_len(self) -> usize {
+    /// Fixed byte length of the link-layer header.
+    /// Returns `None` for variable-length headers (Pflog) — callers must parse
+    /// the header directly to determine the actual length.
+    pub fn header_len(self) -> Option<usize> {
         match self {
-            LinkType::Ethernet => 14,
-            LinkType::RawIp => 0,
-            LinkType::Null => 4,
-            LinkType::LinuxSll => 16,
-            LinkType::Pflog => 0,  // variable — parsed from header
-            LinkType::Enc => 12,
+            LinkType::Ethernet => Some(14),
+            LinkType::RawIp => Some(0),
+            LinkType::Null => Some(4),
+            LinkType::LinuxSll => Some(16),
+            LinkType::Pflog => None, // variable — parsed from header byte 0
+            LinkType::Enc => Some(12),
         }
     }
 }

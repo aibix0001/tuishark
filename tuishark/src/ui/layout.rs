@@ -50,30 +50,40 @@ impl AppLayout {
         }
 
         // Normal (non-zoomed) layout
-        let normal_chunks = Layout::default()
+        // Step 1: packet table on top, lower area (detail + hex | kernel trace) below
+        let main_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(10),   // packet table
-                Constraint::Length(10), // detail tree
-                Constraint::Length(8),  // bottom panes
+                Constraint::Length(18), // lower area (10 detail + 8 hex)
             ])
             .split(content);
 
-        let bottom_chunks = Layout::default()
+        // Step 2: split lower area into left column and kernel trace (right)
+        let lower_cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Percentage(50),
                 Constraint::Percentage(50),
             ])
-            .split(normal_chunks[2]);
+            .split(main_rows[1]);
+
+        // Step 3: split left column into detail tree (top) and hex dump (bottom)
+        let left_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10), // detail tree
+                Constraint::Length(8),  // hex dump
+            ])
+            .split(lower_cols[0]);
 
         Self {
             header,
             filter_bar,
-            packet_table: normal_chunks[0],
-            detail_tree: normal_chunks[1],
-            bottom_left: bottom_chunks[0],
-            bottom_right: bottom_chunks[1],
+            packet_table: main_rows[0],
+            detail_tree: left_rows[0],
+            bottom_left: left_rows[1],
+            bottom_right: lower_cols[1],
             status_bar,
         }
     }

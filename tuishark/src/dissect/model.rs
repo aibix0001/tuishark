@@ -115,6 +115,7 @@ impl fmt::Display for PfAction {
 pub enum PfDirection {
     In,
     Out,
+    Fwd,
     Unknown(u8),
 }
 
@@ -123,8 +124,31 @@ impl fmt::Display for PfDirection {
         match self {
             PfDirection::In => write!(f, "in"),
             PfDirection::Out => write!(f, "out"),
+            PfDirection::Fwd => write!(f, "fwd"),
             PfDirection::Unknown(v) => write!(f, "unknown({v})"),
         }
+    }
+}
+
+/// Decode pflog reason code to human-readable string.
+pub fn pflog_reason_str(reason: u8) -> &'static str {
+    match reason {
+        0 => "match",
+        1 => "bad-offset",
+        2 => "fragment",
+        3 => "short",
+        4 => "normalize",
+        5 => "memory",
+        6 => "bad-timestamp",
+        7 => "congestion",
+        8 => "ip-option",
+        9 => "proto-cksum",
+        10 => "state-mismatch",
+        11 => "state-insert",
+        12 => "state-limit",
+        13 => "src-limit",
+        14 => "synproxy",
+        _ => "unknown",
     }
 }
 

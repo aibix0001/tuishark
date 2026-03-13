@@ -1,8 +1,8 @@
 use etherparse::{LinkSlice, NetSlice, SlicedPacket, TransportSlice};
 
 use super::model::{
-    EncMeta, Layer, LayerField, LinkMeta, LinkType, PacketDetail, PacketSummary, PfAction,
-    PfDirection, PflogMeta, Protocol,
+    pflog_reason_str, EncMeta, Layer, LayerField, LinkMeta, LinkType, PacketDetail, PacketSummary,
+    PfAction, PfDirection, PflogMeta, Protocol,
 };
 
 #[cfg(test)]
@@ -196,7 +196,7 @@ pub fn dissect_detail(data: &[u8], link_type: LinkType) -> PacketDetail {
                         },
                         LayerField {
                             name: "Reason".into(),
-                            value: format!("{}", meta.reason),
+                            value: format!("{} ({})", pflog_reason_str(meta.reason), meta.reason),
                             byte_range: Some((3, 4)),
                         },
                         LayerField {
@@ -389,14 +389,16 @@ pub fn parse_pflog_header(data: &[u8]) -> Option<(PflogMeta, &[u8])> {
         .trim_end_matches('\0')
         .to_string();
 
-    // Rule number: bytes 20..24 (big-endian u32)
-    let rule_number = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+    // Rule number: bytes 20..24 (host-endian u32 per FreeBSD pfloghdr)
+    // OPNsense/amd64 is little-endian; using LE for cross-platform correctness
+    let rule_number = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
 
     // Direction: byte 44
     let direction = if actual_len > 44 {
         match data[44] {
             0 => PfDirection::In,    // PF_IN
             1 => PfDirection::Out,   // PF_OUT
+            2 => PfDirection::Fwd,   // PF_FWD (forwarded)
             v => PfDirection::Unknown(v),
         }
     } else {
@@ -769,8 +771,8 @@ mod tests {
         let ifname_bytes = ifname.as_bytes();
         let copy_len = ifname_bytes.len().min(16);
         pkt[4..4 + copy_len].copy_from_slice(&ifname_bytes[..copy_len]);
-        // rule number (bytes 20..24, big-endian)
-        pkt[20..24].copy_from_slice(&rule_number.to_be_bytes());
+        // rule number (bytes 20..24, little-endian per FreeBSD/amd64)
+        pkt[20..24].copy_from_slice(&rule_number.to_le_bytes());
         // direction at byte 44
         pkt[44] = direction;
         // Append a raw IPv4 TCP packet

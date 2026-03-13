@@ -23,6 +23,8 @@ variables:
 build-amd64:
   stage: build
   timeout: 2h
+  tags:
+    - x86_64
   image: docker:27
   services:
     - docker:27-dind
@@ -49,6 +51,8 @@ build-arm64:
 
 create-manifest:
   stage: manifest
+  tags:
+    - x86_64
   image: docker:27
   services:
     - docker:27-dind

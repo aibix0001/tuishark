@@ -838,7 +838,7 @@ impl App {
         }
 
         // Hex view
-        if layout.bottom_left.height > 0 {
+        if layout.hex_view.height > 0 {
             let hex_data = self
                 .selected_packet
                 .and_then(|idx| self.store.get_raw(idx));
@@ -849,7 +849,7 @@ impl App {
                 self.active_pane == Pane::HexView,
                 self.config.display.hex_uppercase,
             );
-            frame.render_widget(hex_view, layout.bottom_left);
+            frame.render_widget(hex_view, layout.hex_view);
         }
 
         // Protocol for selected packet (used by trace view + container dialog)
@@ -860,7 +860,7 @@ impl App {
             .unwrap_or(0);
 
         // Kernel trace (Phase 6)
-        if layout.bottom_right.height > 0 {
+        if layout.kernel_trace.height > 0 {
             let trace_info = self
                 .selected_packet
                 .and_then(|idx| self.trace_store.get(idx));
@@ -888,7 +888,7 @@ impl App {
                     trace_view = trace_view.with_map_entries(engine.map_entry_count());
                 }
             }
-            frame.render_widget(trace_view, layout.bottom_right);
+            frame.render_widget(trace_view, layout.kernel_trace);
         }
 
         // Status bar

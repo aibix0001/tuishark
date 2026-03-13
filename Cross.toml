@@ -7,4 +7,4 @@
 [target.x86_64-unknown-freebsd]
 # cross provides a pre-built Docker image with FreeBSD sysroot.
 # libpcap is included in the FreeBSD base system — no extra packages needed.
-# tshark is NOT included; install separately on the target: pkg install tshark
+# tshark is NOT included; install separately on the target: pkg install wireshark-nox11

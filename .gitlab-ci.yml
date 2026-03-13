@@ -26,8 +26,17 @@ check-freebsd:
   tags:
     - x86_64
   image: rust:1.94-bookworm
+  variables:
+    CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+  cache:
+    key: freebsd-check
+    paths:
+      - .cargo/registry/
+      - target/
   script:
     - rustup target add x86_64-unknown-freebsd
+    # Type-checking gate only (no linker needed); full cross-build CI in Phase 12.
+    # trace feature is not in default features, so eBPF code is excluded.
     - cargo check --target x86_64-unknown-freebsd -p tuishark
   extends: .build-rules
 

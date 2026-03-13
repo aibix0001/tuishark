@@ -106,6 +106,7 @@ mod tests {
                 info: format!("Seq={i}"),
                 src_port: Some(12345),
                 dst_port: Some(80),
+                link_meta: None,
             };
             store.add(pkt, vec![0u8; 64]);
         }
@@ -162,6 +163,7 @@ mod tests {
             info: "GET /path?a=1,b=2 HTTP/1.1".into(),
             src_port: Some(8080),
             dst_port: Some(80),
+            link_meta: None,
         };
         store.add(pkt, vec![0u8; 100]);
         let mut buf = Vec::new();
@@ -207,6 +209,7 @@ mod tests {
             info: "Echo request".into(),
             src_port: None,
             dst_port: None,
+            link_meta: None,
         };
         store.add(pkt, vec![0u8; 64]);
         let mut buf = Vec::new();

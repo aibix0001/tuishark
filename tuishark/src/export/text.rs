@@ -106,6 +106,7 @@ mod tests {
                 info: format!("TCP segment #{i}"),
                 src_port: Some(54321),
                 dst_port: Some(443),
+                link_meta: None,
             };
             store.add(pkt, vec![0u8; 1500]);
         }
@@ -164,6 +165,7 @@ mod tests {
             info: "TCP SYN".into(),
             src_port: Some(443),
             dst_port: Some(80),
+            link_meta: None,
         };
         store.add(pkt, vec![0u8; 64]);
         let mut buf = Vec::new();

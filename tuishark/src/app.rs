@@ -462,6 +462,7 @@ impl App {
             self.config.capture.promiscuous,
             self.config.capture.snap_length,
         )?;
+        self.store.set_link_type(capture.link_type());
         self.live_capture = Some(capture);
         self.capture_state = CaptureState::Capturing;
         self.interface_name = Some(interface.to_string());
@@ -1697,7 +1698,7 @@ impl App {
 
         if let Some(raw) = raw_owned {
             // Fast dissection (immediate)
-            let detail = dissect_detail(&raw);
+            let detail = dissect_detail(&raw, self.store.link_type());
             self.expanded_layers = detail
                 .layers
                 .iter()
@@ -1836,10 +1837,11 @@ impl App {
             self.stop_capture();
         }
 
-        let (packets, first_ts) = load_pcap(path)?;
+        let (packets, first_ts, link_type) = load_pcap(path)?;
 
         // Reset state
         self.store.clear();
+        self.store.set_link_type(link_type);
         self.selected_packet = None;
         self.scroll_offset = 0;
         self.detail = None;

@@ -44,6 +44,7 @@ mod tests {
             info: "test".into(),
             src_port: Some(12345),
             dst_port: Some(80),
+            link_meta: None,
         }
     }
 

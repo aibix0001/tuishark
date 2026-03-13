@@ -90,6 +90,7 @@ mod tests {
                 info: format!("Seq={i}"),
                 src_port: Some(12345),
                 dst_port: Some(80),
+                link_meta: None,
             };
             store.add(pkt, vec![0u8; 64]);
         }

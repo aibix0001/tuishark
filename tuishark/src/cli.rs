@@ -115,7 +115,7 @@ fn run_file(
 ) -> Result<()> {
     install_signal_handler();
 
-    let (packets, _first_ts) = load_pcap(path)?;
+    let (packets, _first_ts, _link_type) = load_pcap(path)?;
     let mut out = BufWriter::new(io::stdout().lock());
     write_header(&mut out, format)?;
 

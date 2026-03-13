@@ -3,26 +3,26 @@ use pcap::Capture;
 use std::path::Path;
 
 use crate::dissect::fast::parse_packet_with_wire_len;
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkType, PacketSummary};
 
 /// Maximum consecutive read errors before bailing out (prevents infinite loop on corrupt files).
 const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
 /// Load packets from a pcap/pcapng file.
-/// Returns (packets, absolute_first_timestamp).
-pub fn load_pcap(path: &Path) -> Result<(Vec<(PacketSummary, Vec<u8>)>, Option<f64>)> {
+/// Returns (packets, absolute_first_timestamp, link_type).
+pub fn load_pcap(path: &Path) -> Result<(Vec<(PacketSummary, Vec<u8>)>, Option<f64>, LinkType)> {
     let mut cap = Capture::from_file(path)
         .with_context(|| format!("failed to open pcap file: {}", path.display()))?;
 
-    // Validate link type — only Ethernet supported
     let datalink = cap.get_datalink();
-    if datalink != pcap::Linktype::ETHERNET {
-        anyhow::bail!(
-            "unsupported link type in '{}': {:?} (only Ethernet is supported)",
+    let link_type = LinkType::from_pcap(datalink).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unsupported link type in '{}': {:?} (DLT {})",
             path.display(),
-            datalink
-        );
-    }
+            datalink,
+            datalink.0
+        )
+    })?;
 
     let mut packets = Vec::new();
     let mut first_ts: Option<f64> = None;
@@ -45,7 +45,7 @@ pub fn load_pcap(path: &Path) -> Result<(Vec<(PacketSummary, Vec<u8>)>, Option<f
                 let index = packets.len();
                 let original_length = packet.header.len as usize;
                 let raw = packet.data.to_vec();
-                let summary = parse_packet_with_wire_len(index, relative_ts, &raw, original_length);
+                let summary = parse_packet_with_wire_len(index, relative_ts, &raw, original_length, link_type);
                 packets.push((summary, raw));
             }
             Err(pcap::Error::NoMorePackets) => break,
@@ -61,5 +61,5 @@ pub fn load_pcap(path: &Path) -> Result<(Vec<(PacketSummary, Vec<u8>)>, Option<f
         }
     }
 
-    Ok((packets, first_ts))
+    Ok((packets, first_ts, link_type))
 }

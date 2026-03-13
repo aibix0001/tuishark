@@ -60,6 +60,8 @@ fn protocol_layers(pkt: &PacketSummary) -> ([Protocol; 4], usize) {
         // Link-layer
         Protocol::Arp => ([Protocol::Ethernet, Protocol::Arp, Protocol::Arp, Protocol::Arp], 2),
         Protocol::Ethernet => ([Protocol::Ethernet, Protocol::Ethernet, Protocol::Ethernet, Protocol::Ethernet], 1),
+        Protocol::Pflog => ([Protocol::Pflog, net, pkt.protocol.clone(), pkt.protocol.clone()], 2),
+        Protocol::Enc => ([Protocol::Enc, net, pkt.protocol.clone(), pkt.protocol.clone()], 2),
         Protocol::Unknown(_) => ([Protocol::Ethernet, pkt.protocol.clone(), pkt.protocol.clone(), pkt.protocol.clone()], 2),
     }
 }
@@ -78,6 +80,8 @@ fn proto_discriminant(p: &Protocol) -> u16 {
         Protocol::Ipv4 => 8,
         Protocol::Ipv6 => 9,
         Protocol::Ethernet => 10,
+        Protocol::Pflog => 12,
+        Protocol::Enc => 13,
         Protocol::Unknown(_) => 11,
     }
 }
@@ -212,6 +216,11 @@ fn is_child_of(child: &Protocol, parent: &Protocol) -> bool {
         (Protocol::Ipv4, Protocol::Ethernet) => true,
         (Protocol::Ipv6, Protocol::Ethernet) => true,
         (Protocol::Arp, Protocol::Ethernet) => true,
+        // Network under pflog/enc (link → network)
+        (Protocol::Ipv4, Protocol::Pflog) => true,
+        (Protocol::Ipv6, Protocol::Pflog) => true,
+        (Protocol::Ipv4, Protocol::Enc) => true,
+        (Protocol::Ipv6, Protocol::Enc) => true,
         // Unknown under anything
         (Protocol::Unknown(_), _) => true,
         _ => false,
@@ -299,6 +308,7 @@ mod tests {
             info: "test".into(),
             src_port: Some(12345),
             dst_port: Some(80),
+            link_meta: None,
         };
         (summary, raw)
     }

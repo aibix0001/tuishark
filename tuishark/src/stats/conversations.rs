@@ -201,6 +201,7 @@ mod tests {
             info: "test".into(),
             src_port: Some(src_port),
             dst_port: Some(dst_port),
+            link_meta: None,
         };
         (summary, raw)
     }

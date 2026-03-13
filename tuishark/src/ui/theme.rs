@@ -102,6 +102,7 @@ impl Theme {
             Protocol::Icmp | Protocol::Icmpv6 => self.flamingo,
             Protocol::Ipv4 | Protocol::Ipv6 => self.teal,
             Protocol::Ethernet => self.lavender,
+            Protocol::Pflog | Protocol::Enc => self.red,
             Protocol::Unknown(_) => self.subtext0,
         }
     }

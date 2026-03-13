@@ -41,13 +41,14 @@ pub struct DissectWorker {
 impl DissectWorker {
     /// Spawn a new background dissection worker thread.
     /// Returns `Err` with a description if tshark/DeepDissector fails to initialize.
-    pub fn try_spawn() -> Result<Self, String> {
+    /// The `linktype` parameter specifies the pcap link-layer type (e.g., 1 for Ethernet).
+    pub fn try_spawn(linktype: u32) -> Result<Self, String> {
         let (request_tx, request_rx) = mpsc::channel::<DissectRequest>();
         let (result_tx, result_rx) = mpsc::channel::<DissectResult>();
         let latest_seq = Arc::new(AtomicUsize::new(0));
         let alive = Arc::new(AtomicBool::new(true));
 
-        let dissector = DeepDissector::new_ethernet().map_err(|e| format!("{e:#}"))?;
+        let dissector = DeepDissector::new(linktype).map_err(|e| format!("{e:#}"))?;
 
         let seq_clone = latest_seq.clone();
         let alive_clone = alive.clone();

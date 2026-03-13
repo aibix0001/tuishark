@@ -162,6 +162,7 @@ mod tests {
             info: "54321 → 443 [SYN] Seq=1000 Ack=0 Win=65535".into(),
             src_port: Some(54321),
             dst_port: Some(443),
+            link_meta: None,
         }
     }
 
@@ -266,6 +267,7 @@ mod tests {
             info: "ARP".into(),
             src_port: None,
             dst_port: None,
+            link_meta: None,
         };
         let expr = parser::parse("port == 80").unwrap();
         assert!(!super::matches(&expr, &pkt));

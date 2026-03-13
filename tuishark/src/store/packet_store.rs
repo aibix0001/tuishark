@@ -1,10 +1,11 @@
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkType, PacketSummary};
 
 pub struct PacketStore {
     packets: Vec<PacketSummary>,
     raw_data: Vec<Vec<u8>>,
     first_absolute_ts: Option<f64>,
     modified_since_save: bool,
+    link_type: LinkType,
 }
 
 impl Default for PacketStore {
@@ -14,6 +15,7 @@ impl Default for PacketStore {
             raw_data: Vec::new(),
             first_absolute_ts: None,
             modified_since_save: false,
+            link_type: LinkType::Ethernet,
         }
     }
 }
@@ -75,11 +77,20 @@ impl PacketStore {
         }
     }
 
+    pub fn set_link_type(&mut self, lt: LinkType) {
+        self.link_type = lt;
+    }
+
+    pub fn link_type(&self) -> LinkType {
+        self.link_type
+    }
+
     pub fn clear(&mut self) {
         self.packets.clear();
         self.raw_data.clear();
         self.first_absolute_ts = None;
         self.modified_since_save = false;
+        self.link_type = LinkType::Ethernet;
     }
 }
 
@@ -141,6 +152,7 @@ mod tests {
             info: "test".into(),
             src_port: Some(12345),
             dst_port: Some(80),
+            link_meta: None,
         };
         (summary, raw)
     }

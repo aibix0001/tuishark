@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use pcap::{Capture, Linktype};
+use pcap::Capture;
 use std::path::Path;
 
 use crate::store::packet_store::PacketStore;
@@ -16,7 +16,8 @@ pub fn save_pcap(path: &Path, store: &PacketStore) -> Result<usize> {
         .first_absolute_ts()
         .context("cannot save: no base timestamp available (capture may not have started)")?;
 
-    let cap = Capture::dead(Linktype::ETHERNET)
+    let pcap_linktype = store.link_type().to_pcap();
+    let cap = Capture::dead(pcap_linktype)
         .context("failed to create dead capture handle")?;
     let mut savefile = cap
         .savefile(path)

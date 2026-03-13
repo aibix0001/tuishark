@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use anyhow::{Context, Result};
 
 use crate::dissect::fast::parse_packet_with_wire_len;
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkType, PacketSummary};
 
 /// Channel capacity for packets between capture thread and UI.
 const CHANNEL_CAPACITY: usize = 10_000;
@@ -39,6 +39,7 @@ pub struct LiveCapture {
     handle: Option<JoinHandle<()>>,
     error: Arc<std::sync::Mutex<Option<String>>>,
     first_absolute_ts: Arc<std::sync::Mutex<Option<f64>>>,
+    link_type: LinkType,
 }
 
 impl LiveCapture {
@@ -63,14 +64,14 @@ impl LiveCapture {
             .open()
             .with_context(|| format!("failed to start capture on '{interface}'"))?;
 
-        // Check link type — we only support Ethernet (DLT_EN10MB = 1)
         let datalink = cap.get_datalink();
-        if datalink != pcap::Linktype::ETHERNET {
-            anyhow::bail!(
-                "unsupported link type on '{interface}': {:?} (only Ethernet is supported)",
-                datalink
-            );
-        }
+        let link_type = LinkType::from_pcap(datalink).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unsupported link type on '{interface}': {:?} (DLT {})",
+                datalink,
+                datalink.0
+            )
+        })?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let error: Arc<std::sync::Mutex<Option<String>>> =
@@ -82,8 +83,9 @@ impl LiveCapture {
         let stop = stop_flag.clone();
         let err = error.clone();
         let first_ts_clone = first_absolute_ts.clone();
+        let lt = link_type;
         let handle = thread::spawn(move || {
-            capture_loop(cap, tx, stop, packet_offset, err, first_ts_clone);
+            capture_loop(cap, tx, stop, packet_offset, err, first_ts_clone, lt);
         });
 
         Ok(Self {
@@ -92,6 +94,7 @@ impl LiveCapture {
             handle: Some(handle),
             error,
             first_absolute_ts,
+            link_type,
         })
     }
 
@@ -129,6 +132,11 @@ impl LiveCapture {
     pub fn first_absolute_ts(&self) -> Option<f64> {
         self.first_absolute_ts.lock().ok()?.as_ref().copied()
     }
+
+    /// Return the link type detected for this capture.
+    pub fn link_type(&self) -> LinkType {
+        self.link_type
+    }
 }
 
 impl Drop for LiveCapture {
@@ -144,6 +152,7 @@ fn capture_loop(
     packet_offset: usize,
     error: Arc<std::sync::Mutex<Option<String>>>,
     first_absolute_ts: Arc<std::sync::Mutex<Option<f64>>>,
+    link_type: LinkType,
 ) {
     let mut index = packet_offset;
     let mut first_ts: Option<f64> = None;
@@ -166,7 +175,7 @@ fn capture_loop(
 
                 let original_length = packet.header.len as usize;
                 let raw = packet.data.to_vec();
-                let summary = parse_packet_with_wire_len(index, relative_ts, &raw, original_length);
+                let summary = parse_packet_with_wire_len(index, relative_ts, &raw, original_length, link_type);
                 index += 1;
 
                 // Bounded channel: if full, drop packet (backpressure)

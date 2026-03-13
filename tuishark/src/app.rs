@@ -240,7 +240,7 @@ impl App {
         config: Config,
     ) -> Self {
         let dissect_worker = if enable_deep {
-            match DissectWorker::try_spawn() {
+            match DissectWorker::try_spawn(1) { // default Ethernet; respawned with correct type on file open/capture
                 Ok(w) => Some(w),
                 Err(e) => {
                     eprintln!("Warning: deep dissection unavailable: {e}");
@@ -462,6 +462,15 @@ impl App {
             self.config.capture.promiscuous,
             self.config.capture.snap_length,
         )?;
+        self.store.set_link_type(capture.link_type());
+        // Respawn deep dissection worker with correct link type for this interface
+        if self.enable_deep {
+            let pcap_lt = capture.link_type().to_pcap().0 as u32;
+            match DissectWorker::try_spawn(pcap_lt) {
+                Ok(w) => self.dissect_worker = Some(w),
+                Err(_) => self.dissect_worker = None,
+            }
+        }
         self.live_capture = Some(capture);
         self.capture_state = CaptureState::Capturing;
         self.interface_name = Some(interface.to_string());
@@ -1697,7 +1706,7 @@ impl App {
 
         if let Some(raw) = raw_owned {
             // Fast dissection (immediate)
-            let detail = dissect_detail(&raw);
+            let detail = dissect_detail(&raw, self.store.link_type());
             self.expanded_layers = detail
                 .layers
                 .iter()
@@ -1836,10 +1845,11 @@ impl App {
             self.stop_capture();
         }
 
-        let (packets, first_ts) = load_pcap(path)?;
+        let (packets, first_ts, link_type) = load_pcap(path)?;
 
         // Reset state
         self.store.clear();
+        self.store.set_link_type(link_type);
         self.selected_packet = None;
         self.scroll_offset = 0;
         self.detail = None;
@@ -1861,10 +1871,12 @@ impl App {
         self.trace_state = TraceState::FileMode;
         // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
 
-        // Restart deep dissection worker if needed
-        if self.enable_deep && self.dissect_worker.is_none() {
-            if let Ok(w) = DissectWorker::try_spawn() {
-                self.dissect_worker = Some(w);
+        // Restart deep dissection worker with correct link type
+        if self.enable_deep {
+            let pcap_lt = self.store.link_type().to_pcap().0 as u32;
+            match DissectWorker::try_spawn(pcap_lt) {
+                Ok(w) => self.dissect_worker = Some(w),
+                Err(_) => self.dissect_worker = None,
             }
         }
 

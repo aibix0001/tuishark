@@ -9,8 +9,8 @@ pub struct AppLayout {
     pub filter_bar: Rect,
     pub packet_table: Rect,
     pub detail_tree: Rect,
-    pub bottom_left: Rect,
-    pub bottom_right: Rect,
+    pub hex_view: Rect,
+    pub kernel_trace: Rect,
     pub status_bar: Rect,
 }
 
@@ -44,18 +44,22 @@ impl AppLayout {
             return Self {
                 header, filter_bar,
                 packet_table: pt, detail_tree: dt,
-                bottom_left: bl, bottom_right: br,
+                hex_view: bl, kernel_trace: br,
                 status_bar,
             };
         }
 
         // Normal (non-zoomed) layout
+        const DETAIL_HEIGHT: u16 = 10;
+        const HEX_HEIGHT: u16 = 8;
+        const LOWER_HEIGHT: u16 = DETAIL_HEIGHT + HEX_HEIGHT;
+
         // Step 1: packet table on top, lower area (detail + hex | kernel trace) below
         let main_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(10),   // packet table
-                Constraint::Length(18), // lower area (10 detail + 8 hex)
+                Constraint::Min(10),          // packet table
+                Constraint::Max(LOWER_HEIGHT), // lower area shrinks on small terminals
             ])
             .split(content);
 
@@ -72,8 +76,8 @@ impl AppLayout {
         let left_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(10), // detail tree
-                Constraint::Length(8),  // hex dump
+                Constraint::Length(DETAIL_HEIGHT),
+                Constraint::Length(HEX_HEIGHT),
             ])
             .split(lower_cols[0]);
 
@@ -82,8 +86,8 @@ impl AppLayout {
             filter_bar,
             packet_table: main_rows[0],
             detail_tree: left_rows[0],
-            bottom_left: left_rows[1],
-            bottom_right: lower_cols[1],
+            hex_view: left_rows[1],
+            kernel_trace: lower_cols[1],
             status_bar,
         }
     }
@@ -104,8 +108,8 @@ mod tests {
         assert_eq!(layout.status_bar.height, 1);
         assert!(layout.packet_table.height > 0);
         assert!(layout.detail_tree.height > 0);
-        assert!(layout.bottom_left.height > 0);
-        assert!(layout.bottom_right.height > 0);
+        assert!(layout.hex_view.height > 0);
+        assert!(layout.kernel_trace.height > 0);
     }
 
     #[test]
@@ -113,8 +117,8 @@ mod tests {
         let layout = AppLayout::new(AREA, Some(Pane::PacketTable));
         assert!(layout.packet_table.height > 0);
         assert_eq!(layout.detail_tree.height, 0);
-        assert_eq!(layout.bottom_left.height, 0);
-        assert_eq!(layout.bottom_right.height, 0);
+        assert_eq!(layout.hex_view.height, 0);
+        assert_eq!(layout.kernel_trace.height, 0);
     }
 
     #[test]
@@ -122,8 +126,8 @@ mod tests {
         let layout = AppLayout::new(AREA, Some(Pane::DetailTree));
         assert_eq!(layout.packet_table.height, 0);
         assert!(layout.detail_tree.height > 0);
-        assert_eq!(layout.bottom_left.height, 0);
-        assert_eq!(layout.bottom_right.height, 0);
+        assert_eq!(layout.hex_view.height, 0);
+        assert_eq!(layout.kernel_trace.height, 0);
     }
 
     #[test]
@@ -131,8 +135,8 @@ mod tests {
         let layout = AppLayout::new(AREA, Some(Pane::HexView));
         assert_eq!(layout.packet_table.height, 0);
         assert_eq!(layout.detail_tree.height, 0);
-        assert!(layout.bottom_left.height > 0);
-        assert_eq!(layout.bottom_right.height, 0);
+        assert!(layout.hex_view.height > 0);
+        assert_eq!(layout.kernel_trace.height, 0);
     }
 
     #[test]
@@ -140,8 +144,8 @@ mod tests {
         let layout = AppLayout::new(AREA, Some(Pane::KernelTrace));
         assert_eq!(layout.packet_table.height, 0);
         assert_eq!(layout.detail_tree.height, 0);
-        assert_eq!(layout.bottom_left.height, 0);
-        assert!(layout.bottom_right.height > 0);
+        assert_eq!(layout.hex_view.height, 0);
+        assert!(layout.kernel_trace.height > 0);
     }
 
     #[test]
@@ -150,11 +154,34 @@ mod tests {
         let zoomed = AppLayout::new(AREA, Some(Pane::PacketTable));
         // Zoomed pane should be taller than the normal packet table
         assert!(zoomed.packet_table.height > normal.packet_table.height);
-        // Zoomed height should equal the sum of all content pane heights
-        let normal_content = normal.packet_table.height
+        // Zoomed height equals packet_table + left column stack (detail + hex)
+        // (kernel_trace overlaps vertically with detail + hex, not additive)
+        let left_stack = normal.packet_table.height
             + normal.detail_tree.height
-            + normal.bottom_left.height;
-        assert_eq!(zoomed.packet_table.height, normal_content);
+            + normal.hex_view.height;
+        assert_eq!(zoomed.packet_table.height, left_stack);
+    }
+
+    #[test]
+    fn left_column_height_equals_right_column() {
+        let layout = AppLayout::new(AREA, None);
+        assert_eq!(
+            layout.detail_tree.height + layout.hex_view.height,
+            layout.kernel_trace.height,
+            "left column sub-panes should sum to kernel trace height"
+        );
+    }
+
+    #[test]
+    fn small_terminal_layout_no_panic() {
+        let small = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let layout = AppLayout::new(small, None);
+        // Packet table should still be usable
+        assert!(layout.packet_table.height >= 3);
+        // All panes should have some height
+        assert!(layout.detail_tree.height > 0);
+        assert!(layout.hex_view.height > 0);
+        assert!(layout.kernel_trace.height > 0);
     }
 
     #[test]

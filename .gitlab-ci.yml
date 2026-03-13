@@ -1,4 +1,5 @@
 stages:
+  - check
   - build
   - manifest
 
@@ -17,6 +18,18 @@ variables:
         - Cargo.toml
         - tuishark/**/*
         - tuishark-ebpf/**/*
+
+# --- Stage 0: FreeBSD cross-compilation check ---
+
+check-freebsd:
+  stage: check
+  tags:
+    - x86_64
+  image: rust:1.94-bookworm
+  script:
+    - rustup target add x86_64-unknown-freebsd
+    - cargo check --target x86_64-unknown-freebsd -p tuishark
+  extends: .build-rules
 
 # --- Stage 1: native builds in parallel ---
 

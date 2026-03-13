@@ -35,16 +35,14 @@ pub fn save_pcap(path: &Path, store: &PacketStore) -> Result<usize> {
 
         let absolute_ts = base_ts + summary.timestamp;
         // Use floor division to ensure tv_usec is always non-negative.
-        let tv_sec = absolute_ts.floor() as i64;
+        let tv_sec = absolute_ts.floor() as libc::time_t;
         let frac = (absolute_ts - tv_sec as f64) * 1_000_000.0;
-        // Clamp to valid pcap range [0, 999_999]
-        let tv_usec = (frac.round() as i64).clamp(0, 999_999);
+        // Clamp to valid pcap range [0, 999_999].
+        // Cast directly to suseconds_t for portability (i32 on some FreeBSD arches).
+        let tv_usec = (frac.round() as libc::suseconds_t).clamp(0, 999_999);
 
         let header = pcap::PacketHeader {
-            ts: libc::timeval {
-                tv_sec: tv_sec as libc::time_t,
-                tv_usec: tv_usec as libc::suseconds_t,
-            },
+            ts: libc::timeval { tv_sec, tv_usec },
             caplen: raw.len() as u32,
             len: summary.original_length as u32,
         };

@@ -93,8 +93,9 @@ cargo install cross
 cross build --target x86_64-unknown-freebsd -p tuishark --release
 ```
 
-A `Cross.toml` is provided at the repository root. The FreeBSD base system includes
-libpcap, so no extra sysroot packages are needed.
+A `Cross.toml` is provided at the repository root. The cross-rs FreeBSD sysroot
+extracts `base.txz` which includes libpcap headers and libraries — no extra
+package installation is needed.
 
 ### CI
 
@@ -108,9 +109,9 @@ The `.gitlab-ci.yml` includes FreeBSD CI jobs using `cross-rs` for full cross-co
 - **`release-freebsd`** (release stage, tag-only): uploads the binary to the GitLab Generic
   Package Registry and creates a GitLab release with the binary attached.
 
-`Cross.toml` at the repo root configures the FreeBSD sysroot to install `libpcap` via the
-cross-rs `pre-build` hook. Both FreeBSD jobs use `rust:1.94-bookworm` with Docker-in-Docker
-so that `cross` can launch its build containers.
+`Cross.toml` at the repo root configures the FreeBSD cross-compilation target. The cross-rs
+sysroot already includes libpcap from FreeBSD's `base.txz`. Both FreeBSD jobs use
+`rust:1.94-bookworm` with Docker-in-Docker so that `cross` can launch its build containers.
 
 ## Deployment to OPNsense
 

@@ -31,17 +31,21 @@ test-freebsd:
   services:
     - docker:27-dind
   variables:
+    # cross-rs manages Docker internally; TLS disabled because the rust image
+    # lacks the Docker client and /certs volume sharing does not apply.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   cache:
-    key: freebsd-cross
+    key: freebsd-test
     paths:
       - .cargo/registry/
       - .cargo/bin/
   script:
-    - cargo install cross --locked
-    - cross test --target x86_64-unknown-freebsd -p tuishark
+    - command -v cross || cargo install cross --version 0.2.5 --locked
+    # trace feature excluded: aya/eBPF is Linux-only; stub impls compile cleanly.
+    - cross test --locked --target x86_64-unknown-freebsd -p tuishark
+  # TODO(#37): remove allow_failure once FreeBSD test suite is confirmed stable under QEMU
   allow_failure: true
   extends: .build-rules
 
@@ -83,18 +87,22 @@ build-freebsd:
   services:
     - docker:27-dind
   variables:
+    # cross-rs manages Docker internally; TLS disabled because the rust image
+    # lacks the Docker client and /certs volume sharing does not apply.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   cache:
-    key: freebsd-cross
+    key: freebsd-build
     paths:
       - .cargo/registry/
       - .cargo/bin/
   script:
-    - cargo install cross --locked
-    - cross build --release --target x86_64-unknown-freebsd -p tuishark
+    - command -v cross || cargo install cross --version 0.2.5 --locked
+    # trace feature excluded: aya/eBPF is Linux-only; stub impls compile cleanly.
+    - cross build --locked --release --target x86_64-unknown-freebsd -p tuishark
     - cp target/x86_64-unknown-freebsd/release/tuishark tuishark-freebsd-amd64
+    - strip tuishark-freebsd-amd64 || true
   artifacts:
     paths:
       - tuishark-freebsd-amd64
@@ -142,7 +150,9 @@ create-manifest:
       fi
   extends: .build-rules
 
-# --- Stage 3: FreeBSD release (tag-only) ---
+# --- Stage 3: FreeBSD release (semver tags only) ---
+# NOTE: this job creates the GitLab release object. If Linux binaries are added
+# later, refactor into a single unified release job to avoid 409 conflicts.
 
 release-freebsd:
   stage: release
@@ -153,18 +163,24 @@ release-freebsd:
     - job: build-freebsd
       artifacts: true
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_TAG =~ /^v\d+/
   script:
     - |
       # Upload binary to the Generic Package Registry for a stable download URL
       apk add --no-cache curl
-      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+      curl -f --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
            --upload-file tuishark-freebsd-amd64 \
            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/tuishark/${CI_COMMIT_TAG}/tuishark-freebsd-amd64"
   release:
     tag_name: $CI_COMMIT_TAG
     name: "Release ${CI_COMMIT_TAG}"
-    description: "TuiShark ${CI_COMMIT_TAG} — includes FreeBSD amd64 binary"
+    description: |
+      TuiShark ${CI_COMMIT_TAG}
+
+      ## FreeBSD amd64 binary
+
+      Download `tuishark-freebsd-amd64` from the assets below.
+      Requires `tshark` for deep dissection: `pkg install wireshark-nox11`.
     assets:
       links:
         - name: "tuishark-freebsd-amd64"

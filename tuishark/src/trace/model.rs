@@ -39,6 +39,7 @@ impl FlowKey {
     }
 
     /// Create the reverse flow key (swap src/dst).
+    #[allow(dead_code)]
     pub fn reverse(&self) -> Self {
         Self {
             src_addr: self.dst_addr,

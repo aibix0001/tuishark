@@ -5,7 +5,9 @@ use std::time::Duration;
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    #[allow(dead_code)]
     Mouse(MouseEvent),
+    #[allow(dead_code)]
     Resize(u16, u16),
     Tick,
 }

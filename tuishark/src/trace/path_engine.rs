@@ -1,5 +1,8 @@
+#[cfg(feature = "trace")]
 use super::model::FlowKey;
-use super::path_model::{PathEvent, PathTraceState, TraceFilter};
+use super::path_model::{PathEvent, PathTraceState};
+#[cfg(feature = "trace")]
+use super::path_model::TraceFilter;
 
 #[cfg(feature = "trace")]
 use aya::{
@@ -210,6 +213,7 @@ impl PathTraceEngine {
 
 /// Stub when the trace feature is not compiled.
 #[cfg(not(feature = "trace"))]
+#[allow(dead_code)]
 pub struct PathTraceEngine {
     pub events_lost: u64,
     pub state: PathTraceState,

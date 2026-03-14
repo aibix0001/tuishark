@@ -43,6 +43,7 @@ impl StatsTab {
         }
     }
 
+    #[allow(dead_code)]
     pub fn index(self) -> usize {
         match self {
             StatsTab::ProtocolHierarchy => 0,
@@ -52,6 +53,7 @@ impl StatsTab {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_index(i: usize) -> Option<Self> {
         Self::ALL.get(i).copied()
     }

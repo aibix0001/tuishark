@@ -15,6 +15,7 @@ pub struct IpInfo {
     pub as_name: String,
     pub country: String,
     pub rir: String,
+    #[allow(dead_code)]
     pub is_special: bool,
     pub error: Option<String>,
 }

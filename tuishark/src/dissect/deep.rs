@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use super::model::{Layer, LayerField, PacketDetail};
 
 /// Default pcap linktype for Ethernet (DLT_EN10MB).
+#[allow(dead_code)]
 pub const LINKTYPE_ETHERNET: u32 = 1;
 
 /// Default snap length matching tcpdump/Wireshark convention.
@@ -116,6 +117,7 @@ impl DeepDissector {
     }
 
     /// Create a new DeepDissector with the default Ethernet linktype.
+    #[allow(dead_code)]
     pub fn new_ethernet() -> Result<Self> {
         Self::new(LINKTYPE_ETHERNET)
     }

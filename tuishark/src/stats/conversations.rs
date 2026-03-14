@@ -151,6 +151,8 @@ impl ConvSortColumn {
         Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 
+    // TODO: use for sortable column headers in conversations table
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::TotalPackets => "Total Pkts",

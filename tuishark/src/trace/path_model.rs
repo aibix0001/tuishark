@@ -134,6 +134,7 @@ impl Default for TraceFilter {
 #[derive(Debug, Clone)]
 pub struct PathHop {
     pub func_id: u16,
+    #[allow(dead_code)]
     pub timestamp_ns: u64,
     pub delta_ns: u64,
 }

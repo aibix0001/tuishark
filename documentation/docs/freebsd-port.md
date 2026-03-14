@@ -98,10 +98,19 @@ libpcap, so no extra sysroot packages are needed.
 
 ### CI
 
-The `.gitlab-ci.yml` includes a `check-freebsd` job in the `check` stage that runs
-`cargo check --target x86_64-unknown-freebsd` on every push, ensuring FreeBSD
-compatibility is not regressed. This is a type-checking gate only — full linking
-and cross-compilation CI will be added in Phase 12.
+The `.gitlab-ci.yml` includes FreeBSD CI jobs using `cross-rs` for full cross-compilation:
+
+- **`test-freebsd`** (check stage): runs `cross test --target x86_64-unknown-freebsd` under
+  QEMU user-mode emulation. Marked `allow_failure: true` since pcap-dependent tests may
+  not work under emulation.
+- **`build-freebsd`** (build stage): runs `cross build --release --target x86_64-unknown-freebsd`
+  and produces a `tuishark-freebsd-amd64` binary artifact (retained 30 days).
+- **`release-freebsd`** (release stage, tag-only): uploads the binary to the GitLab Generic
+  Package Registry and creates a GitLab release with the binary attached.
+
+`Cross.toml` at the repo root configures the FreeBSD sysroot to install `libpcap` via the
+cross-rs `pre-build` hook. Both FreeBSD jobs use `rust:1.94-bookworm` with Docker-in-Docker
+so that `cross` can launch its build containers.
 
 ## Deployment to OPNsense
 

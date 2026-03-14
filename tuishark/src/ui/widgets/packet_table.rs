@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::config::columns::{Column, ColumnConfig};
 use crate::config::TimestampFormat;
-use crate::dissect::model::{LinkMeta, PacketSummary};
+use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use crate::ui::theme::Theme;
 
 pub struct PacketTable<'a> {
@@ -97,8 +97,16 @@ impl<'a> PacketTable<'a> {
                 Some(LinkMeta::Pflog(m)) => m.rule_number.to_string(),
                 _ => String::new(),
             },
+            Column::PfReason => match &pkt.link_meta {
+                Some(LinkMeta::Pflog(m)) => model::pflog_reason_str(m.reason).to_string(),
+                _ => String::new(),
+            },
             Column::EncSpi => match &pkt.link_meta {
                 Some(LinkMeta::Enc(m)) => format!("0x{:08x}", m.spi),
+                _ => String::new(),
+            },
+            Column::EncFlags => match &pkt.link_meta {
+                Some(LinkMeta::Enc(m)) => model::enc_flags_str(m.flags).to_string(),
                 _ => String::new(),
             },
         }

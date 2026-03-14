@@ -66,7 +66,7 @@ impl fmt::Display for LinkType {
 }
 
 /// Metadata extracted from pflog link-layer headers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PflogMeta {
     pub action: PfAction,
     pub direction: PfDirection,
@@ -92,21 +92,35 @@ pub enum PfAction {
     Unknown(u8),
 }
 
+impl PfAction {
+    /// Zero-allocation string representation for hot-path filter evaluation.
+    /// Returns `None` for `Unknown` variants (caller must fall back to `to_string()`).
+    pub fn as_str(&self) -> Option<&'static str> {
+        match self {
+            PfAction::Pass => Some("pass"),
+            PfAction::Block => Some("block"),
+            PfAction::Scrub => Some("scrub"),
+            PfAction::NoScrub => Some("no-scrub"),
+            PfAction::Nat => Some("nat"),
+            PfAction::NoNat => Some("no-nat"),
+            PfAction::Binat => Some("binat"),
+            PfAction::NoBinat => Some("no-binat"),
+            PfAction::Rdr => Some("rdr"),
+            PfAction::NoRdr => Some("no-rdr"),
+            PfAction::Match => Some("match"),
+            PfAction::Unknown(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for PfAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PfAction::Pass => write!(f, "pass"),
-            PfAction::Block => write!(f, "block"),
-            PfAction::Scrub => write!(f, "scrub"),
-            PfAction::NoScrub => write!(f, "no-scrub"),
-            PfAction::Nat => write!(f, "nat"),
-            PfAction::NoNat => write!(f, "no-nat"),
-            PfAction::Binat => write!(f, "binat"),
-            PfAction::NoBinat => write!(f, "no-binat"),
-            PfAction::Rdr => write!(f, "rdr"),
-            PfAction::NoRdr => write!(f, "no-rdr"),
-            PfAction::Match => write!(f, "match"),
-            PfAction::Unknown(v) => write!(f, "unknown({v})"),
+        match self.as_str() {
+            Some(s) => write!(f, "{s}"),
+            None => {
+                let PfAction::Unknown(v) = self else { unreachable!() };
+                write!(f, "unknown({v})")
+            }
         }
     }
 }
@@ -119,13 +133,26 @@ pub enum PfDirection {
     Unknown(u8),
 }
 
+impl PfDirection {
+    /// Zero-allocation string representation for hot-path filter evaluation.
+    pub fn as_str(&self) -> Option<&'static str> {
+        match self {
+            PfDirection::In => Some("in"),
+            PfDirection::Out => Some("out"),
+            PfDirection::Fwd => Some("fwd"),
+            PfDirection::Unknown(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for PfDirection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PfDirection::In => write!(f, "in"),
-            PfDirection::Out => write!(f, "out"),
-            PfDirection::Fwd => write!(f, "fwd"),
-            PfDirection::Unknown(v) => write!(f, "unknown({v})"),
+        match self.as_str() {
+            Some(s) => write!(f, "{s}"),
+            None => {
+                let PfDirection::Unknown(v) = self else { unreachable!() };
+                write!(f, "unknown({v})")
+            }
         }
     }
 }
@@ -153,15 +180,25 @@ pub fn pflog_reason_str(reason: u8) -> &'static str {
 }
 
 /// Metadata extracted from enc (IPsec tunnel) link-layer headers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncMeta {
     pub address_family: u32,
     pub spi: u32,
     pub flags: u32,
 }
 
+/// Decode enc flags to human-readable string.
+pub fn enc_flags_str(flags: u32) -> &'static str {
+    match (flags & 1 != 0, flags & 2 != 0) {
+        (true, true) => "auth+conf",
+        (true, false) => "auth",
+        (false, true) => "conf",
+        (false, false) => "none",
+    }
+}
+
 /// Link-layer metadata attached to a packet summary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LinkMeta {
     Pflog(PflogMeta),
     Enc(EncMeta),

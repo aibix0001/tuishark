@@ -38,6 +38,7 @@ pub enum Field {
     PfDirection,
     PfIfname,
     PfRule,
+    PfReason,
     // enc (IPsec) link-layer fields
     EncSpi,
     EncFlags,

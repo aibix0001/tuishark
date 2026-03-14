@@ -3,7 +3,7 @@ use std::io::Write;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::dissect::model::{LinkMeta, PacketSummary};
+use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use crate::store::packet_store::PacketStore;
 
 #[derive(Serialize)]
@@ -30,6 +30,8 @@ struct ExportPacket {
     #[serde(skip_serializing_if = "Option::is_none")]
     pf_rule: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pf_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     enc_spi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enc_flags: Option<u32>,
@@ -41,13 +43,14 @@ impl ExportPacket {
             let epoch = base + pkt.timestamp;
             super::csv::format_epoch_iso8601(epoch)
         });
-        let (pf_action, pf_direction, pf_interface, pf_rule, enc_spi, enc_flags) =
+        let (pf_action, pf_direction, pf_interface, pf_rule, pf_reason, enc_spi, enc_flags) =
             match &pkt.link_meta {
                 Some(LinkMeta::Pflog(m)) => (
                     Some(m.action.to_string()),
                     Some(m.direction.to_string()),
                     Some(m.ifname.clone()),
                     Some(m.rule_number),
+                    Some(model::pflog_reason_str(m.reason).to_string()),
                     None,
                     None,
                 ),
@@ -56,10 +59,11 @@ impl ExportPacket {
                     None,
                     None,
                     None,
+                    None,
                     Some(format!("0x{:08x}", m.spi)),
                     Some(m.flags),
                 ),
-                None => (None, None, None, None, None, None),
+                None => (None, None, None, None, None, None, None),
             };
         Self {
             index: pkt.index + 1,
@@ -76,6 +80,7 @@ impl ExportPacket {
             pf_direction,
             pf_interface,
             pf_rule,
+            pf_reason,
             enc_spi,
             enc_flags,
         }
@@ -112,7 +117,7 @@ pub fn export_json<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{EncMeta, PfAction, PfDirection, PflogMeta, Protocol};
 
     fn make_store(n: usize) -> PacketStore {
         let mut store = PacketStore::default();
@@ -180,6 +185,78 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed.is_array());
         assert_eq!(parsed.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn json_pflog_fields() {
+        let mut store = PacketStore::default();
+        let pkt = PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Pflog,
+            length: 100,
+            original_length: 100,
+            info: "block in on em0".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Pflog(PflogMeta {
+                action: PfAction::Block,
+                direction: PfDirection::In,
+                ifname: "em0".into(),
+                rule_number: 42,
+                reason: 0,
+                header_len: 100,
+            })),
+        };
+        store.add(pkt, vec![0u8; 100]);
+        let mut buf = Vec::new();
+        export_json(&mut buf, &store, None, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let pkt = &parsed[0];
+        assert_eq!(pkt["pf_action"], "block");
+        assert_eq!(pkt["pf_direction"], "in");
+        assert_eq!(pkt["pf_interface"], "em0");
+        assert_eq!(pkt["pf_rule"], 42);
+        assert_eq!(pkt["pf_reason"], "match");
+        // enc fields should be absent (not null)
+        assert!(pkt.get("enc_spi").is_none());
+        assert!(pkt.get("enc_flags").is_none());
+    }
+
+    #[test]
+    fn json_enc_fields() {
+        let mut store = PacketStore::default();
+        let pkt = PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Enc,
+            length: 200,
+            original_length: 200,
+            info: "IPsec tunnel".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Enc(EncMeta {
+                address_family: 2,
+                spi: 0x12345678,
+                flags: 3,
+            })),
+        };
+        store.add(pkt, vec![0u8; 200]);
+        let mut buf = Vec::new();
+        export_json(&mut buf, &store, None, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let pkt = &parsed[0];
+        assert_eq!(pkt["enc_spi"], "0x12345678");
+        assert_eq!(pkt["enc_flags"], 3);
+        // pf fields should be absent
+        assert!(pkt.get("pf_action").is_none());
+        assert!(pkt.get("pf_rule").is_none());
     }
 
     #[test]

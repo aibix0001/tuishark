@@ -1,6 +1,6 @@
 /// Evaluate a filter expression against a PacketSummary.
 
-use crate::dissect::model::{LinkMeta, PacketSummary};
+use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use super::ast::{CompareOp, Expr, Field, Value};
 
 #[must_use]
@@ -26,11 +26,17 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
         Field::Len => cmp_int(pkt.original_length as u64, op, value),
         Field::Info => cmp_str(&pkt.info, op, value),
         Field::PfAction => match &pkt.link_meta {
-            Some(LinkMeta::Pflog(m)) => cmp_str(&m.action.to_string(), op, value),
+            Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
+                Some(s) => cmp_str(s, op, value),
+                None => cmp_str(&m.action.to_string(), op, value),
+            },
             _ => false,
         },
         Field::PfDirection => match &pkt.link_meta {
-            Some(LinkMeta::Pflog(m)) => cmp_str(&m.direction.to_string(), op, value),
+            Some(LinkMeta::Pflog(m)) => match m.direction.as_str() {
+                Some(s) => cmp_str(s, op, value),
+                None => cmp_str(&m.direction.to_string(), op, value),
+            },
             _ => false,
         },
         Field::PfIfname => match &pkt.link_meta {
@@ -39,6 +45,10 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
         },
         Field::PfRule => match &pkt.link_meta {
             Some(LinkMeta::Pflog(m)) => cmp_int(m.rule_number as u64, op, value),
+            _ => false,
+        },
+        Field::PfReason => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => cmp_str(model::pflog_reason_str(m.reason), op, value),
             _ => false,
         },
         Field::EncSpi => match &pkt.link_meta {
@@ -64,15 +74,25 @@ fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
         Field::Info => str_contains_lower(&pkt.info, needle),
         Field::Proto => pkt.protocol.contains_lower(needle),
         Field::PfAction => match &pkt.link_meta {
-            Some(LinkMeta::Pflog(m)) => str_contains_lower(&m.action.to_string(), needle),
+            Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
+                Some(s) => str_contains_lower(s, needle),
+                None => str_contains_lower(&m.action.to_string(), needle),
+            },
             _ => false,
         },
         Field::PfDirection => match &pkt.link_meta {
-            Some(LinkMeta::Pflog(m)) => str_contains_lower(&m.direction.to_string(), needle),
+            Some(LinkMeta::Pflog(m)) => match m.direction.as_str() {
+                Some(s) => str_contains_lower(s, needle),
+                None => str_contains_lower(&m.direction.to_string(), needle),
+            },
             _ => false,
         },
         Field::PfIfname => match &pkt.link_meta {
             Some(LinkMeta::Pflog(m)) => str_contains_lower(&m.ifname, needle),
+            _ => false,
+        },
+        Field::PfReason => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => str_contains_lower(model::pflog_reason_str(m.reason), needle),
             _ => false,
         },
         // contains doesn't make sense for numeric fields, but handle gracefully
@@ -432,10 +452,27 @@ mod tests {
     }
 
     #[test]
+    fn pflog_reason_filter() {
+        let expr = parser::parse("pf.reason == match").unwrap();
+        assert!(matches(&expr, &pflog_pkt())); // reason=0 → "match"
+        let expr = parser::parse("pf.reason == \"bad-offset\"").unwrap();
+        assert!(!matches(&expr, &pflog_pkt()));
+    }
+
+    #[test]
+    fn enc_spi_hex_filter() {
+        // Users write hex — verify it works after hex literal parsing
+        let expr = parser::parse("enc.spi == 0x12345678").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
     fn pflog_contains_filter() {
         let expr = parser::parse("pf.action contains \"blo\"").unwrap();
         assert!(matches(&expr, &pflog_pkt()));
         let expr = parser::parse("pf.ifname contains \"em\"").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.direction contains \"in\"").unwrap();
         assert!(matches(&expr, &pflog_pkt()));
     }
 

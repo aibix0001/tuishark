@@ -18,7 +18,9 @@ pub enum Column {
     PfDirection,
     PfInterface,
     PfRule,
+    PfReason,
     EncSpi,
+    EncFlags,
 }
 
 impl Column {
@@ -39,7 +41,9 @@ impl Column {
         Column::PfDirection,
         Column::PfInterface,
         Column::PfRule,
+        Column::PfReason,
         Column::EncSpi,
+        Column::EncFlags,
     ];
 
     pub fn header(&self) -> &'static str {
@@ -55,7 +59,9 @@ impl Column {
             Column::PfDirection => "Dir",
             Column::PfInterface => "Interface",
             Column::PfRule => "Rule#",
+            Column::PfReason => "Reason",
             Column::EncSpi => "SPI",
+            Column::EncFlags => "Flags",
         }
     }
 
@@ -72,7 +78,9 @@ impl Column {
             Column::PfDirection => 5,
             Column::PfInterface => 12,
             Column::PfRule => 6,
+            Column::PfReason => 14,
             Column::EncSpi => 12,
+            Column::EncFlags => 10,
         }
     }
 }
@@ -150,14 +158,16 @@ mod tests {
 
     #[test]
     fn serde_pf_columns() {
-        let toml = r#"visible = ["pfaction", "pfdirection", "pfinterface", "pfrule", "encspi"]"#;
+        let toml = r#"visible = ["pfaction", "pfdirection", "pfinterface", "pfrule", "pfreason", "encspi", "encflags"]"#;
         let config: ColumnConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.visible.len(), 5);
+        assert_eq!(config.visible.len(), 7);
         assert_eq!(config.visible[0], Column::PfAction);
         assert_eq!(config.visible[1], Column::PfDirection);
         assert_eq!(config.visible[2], Column::PfInterface);
         assert_eq!(config.visible[3], Column::PfRule);
-        assert_eq!(config.visible[4], Column::EncSpi);
+        assert_eq!(config.visible[4], Column::PfReason);
+        assert_eq!(config.visible[5], Column::EncSpi);
+        assert_eq!(config.visible[6], Column::EncFlags);
         // Round-trip
         let serialized = toml::to_string(&config).unwrap();
         let parsed: ColumnConfig = toml::from_str(&serialized).unwrap();

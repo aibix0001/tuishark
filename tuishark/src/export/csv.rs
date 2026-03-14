@@ -3,7 +3,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkMeta, PacketSummary};
 use crate::store::packet_store::PacketStore;
 
 /// Write packets as RFC 4180 CSV.
@@ -15,7 +15,7 @@ pub fn export_csv<W: Write>(
 ) -> Result<usize> {
     writeln!(
         writer,
-        "\"No.\",\"Time\",\"Absolute Time\",\"Source\",\"Destination\",\"Protocol\",\"Length\",\"SrcPort\",\"DstPort\",\"Info\""
+        "\"No.\",\"Time\",\"Absolute Time\",\"Source\",\"Destination\",\"Protocol\",\"Length\",\"SrcPort\",\"DstPort\",\"Info\",\"PfAction\",\"PfDirection\",\"PfInterface\",\"PfRule\",\"EncSpi\""
     )?;
 
     let mut count = 0;
@@ -47,9 +47,27 @@ fn write_csv_row<W: Write>(
         .map(|p| p.to_string())
         .unwrap_or_default();
 
+    let (pf_action, pf_dir, pf_iface, pf_rule, enc_spi) = match &pkt.link_meta {
+        Some(LinkMeta::Pflog(m)) => (
+            m.action.to_string(),
+            m.direction.to_string(),
+            m.ifname.clone(),
+            m.rule_number.to_string(),
+            String::new(),
+        ),
+        Some(LinkMeta::Enc(m)) => (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            format!("0x{:08x}", m.spi),
+        ),
+        None => Default::default(),
+    };
+
     writeln!(
         writer,
-        "{},{:.6},{},{},{},{},{},{},{},{}",
+        "{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         pkt.index + 1,
         pkt.timestamp,
         csv_escape(&abs_ts_str),
@@ -60,6 +78,11 @@ fn write_csv_row<W: Write>(
         src_port,
         dst_port,
         csv_escape(&pkt.info),
+        csv_escape(&pf_action),
+        csv_escape(&pf_dir),
+        csv_escape(&pf_iface),
+        pf_rule,
+        enc_spi,
     )?;
     Ok(())
 }
@@ -90,7 +113,7 @@ pub(crate) fn format_epoch_iso8601(epoch: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{PfAction, PfDirection, PflogMeta, Protocol};
 
     fn make_store(n: usize) -> PacketStore {
         let mut store = PacketStore::default();
@@ -193,6 +216,42 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 1); // header only
+    }
+
+    #[test]
+    fn csv_pflog_columns() {
+        let mut store = PacketStore::default();
+        let pkt = PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Pflog,
+            length: 100,
+            original_length: 100,
+            info: "block in on em0".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Pflog(PflogMeta {
+                action: PfAction::Block,
+                direction: PfDirection::In,
+                ifname: "em0".into(),
+                rule_number: 42,
+                reason: 0,
+                header_len: 100,
+            })),
+        };
+        store.add(pkt, vec![0u8; 100]);
+        let mut buf = Vec::new();
+        export_csv(&mut buf, &store, None, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Header has pflog columns
+        assert!(output.contains("\"PfAction\""));
+        // Data row has pflog values
+        assert!(output.contains("block"));
+        assert!(output.contains(",in,"));
+        assert!(output.contains("em0"));
+        assert!(output.contains(",42,"));
     }
 
     #[test]

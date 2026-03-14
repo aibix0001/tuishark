@@ -161,9 +161,7 @@ pub struct EncMeta {
 }
 
 /// Link-layer metadata attached to a packet summary.
-// TODO: wire into packet table columns and display filter engine (pf.action, pf.ifname, enc.spi)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum LinkMeta {
     Pflog(PflogMeta),
     Enc(EncMeta),
@@ -185,8 +183,6 @@ pub struct PacketSummary {
     /// Destination port (TCP/UDP only, None for other protocols).
     pub dst_port: Option<u16>,
     /// Link-layer metadata (pflog/enc only).
-    // TODO: surface in packet table and display filters
-    #[allow(dead_code)]
     pub link_meta: Option<LinkMeta>,
 }
 

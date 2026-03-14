@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkMeta, PacketSummary};
 use crate::store::packet_store::PacketStore;
 
 /// Write packets as a human-readable fixed-width text table.
@@ -73,7 +73,7 @@ pub fn export_text<W: Write>(
 }
 
 fn write_text_row<W: Write>(writer: &mut W, pkt: &PacketSummary) -> Result<()> {
-    writeln!(
+    write!(
         writer,
         "{:>6}  {:>12.6}  {:<45}  {:<45}  {:<10}  {:>6}  {}",
         pkt.index + 1,
@@ -84,6 +84,16 @@ fn write_text_row<W: Write>(writer: &mut W, pkt: &PacketSummary) -> Result<()> {
         pkt.original_length,
         pkt.info,
     )?;
+    match &pkt.link_meta {
+        Some(LinkMeta::Pflog(m)) => {
+            write!(writer, "  [pf: {} {} if={} rule={}]", m.action, m.direction, m.ifname, m.rule_number)?;
+        }
+        Some(LinkMeta::Enc(m)) => {
+            write!(writer, "  [enc: spi=0x{:08x} flags={}]", m.spi, m.flags)?;
+        }
+        None => {}
+    }
+    writeln!(writer)?;
     Ok(())
 }
 

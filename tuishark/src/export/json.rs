@@ -3,7 +3,7 @@ use std::io::Write;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{LinkMeta, PacketSummary};
 use crate::store::packet_store::PacketStore;
 
 #[derive(Serialize)]
@@ -21,6 +21,18 @@ struct ExportPacket {
     src_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dst_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pf_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pf_direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pf_interface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pf_rule: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enc_spi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enc_flags: Option<u32>,
 }
 
 impl ExportPacket {
@@ -29,6 +41,26 @@ impl ExportPacket {
             let epoch = base + pkt.timestamp;
             super::csv::format_epoch_iso8601(epoch)
         });
+        let (pf_action, pf_direction, pf_interface, pf_rule, enc_spi, enc_flags) =
+            match &pkt.link_meta {
+                Some(LinkMeta::Pflog(m)) => (
+                    Some(m.action.to_string()),
+                    Some(m.direction.to_string()),
+                    Some(m.ifname.clone()),
+                    Some(m.rule_number),
+                    None,
+                    None,
+                ),
+                Some(LinkMeta::Enc(m)) => (
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(format!("0x{:08x}", m.spi)),
+                    Some(m.flags),
+                ),
+                None => (None, None, None, None, None, None),
+            };
         Self {
             index: pkt.index + 1,
             timestamp: pkt.timestamp,
@@ -40,6 +72,12 @@ impl ExportPacket {
             info: pkt.info.clone(),
             src_port: pkt.src_port,
             dst_port: pkt.dst_port,
+            pf_action,
+            pf_direction,
+            pf_interface,
+            pf_rule,
+            enc_spi,
+            enc_flags,
         }
     }
 }

@@ -34,6 +34,20 @@ fn main() {
                 } else {
                     "unknown".into()
                 };
+                // Reject precompiled blob if it was built for a different architecture.
+                // pt_regs layout differs between architectures, so a mismatched blob
+                // will silently read wrong registers — fail the build instead.
+                if blob_arch != host_arch && blob_arch != "unknown" {
+                    panic!(
+                        "Precompiled eBPF blob is for {blob_arch} but host is {host_arch}, \
+                         and from-source build failed.\n\
+                         Install the prerequisites and rebuild:\n  \
+                         rustup toolchain install nightly\n  \
+                         rustup component add rust-src --toolchain nightly\n  \
+                         cargo +nightly install bpf-linker\n  \
+                         cargo build --features trace"
+                    );
+                }
                 println!("cargo:rustc-env=TUISHARK_EBPF_ARCH={blob_arch}");
                 println!(
                     "cargo:warning=Using precompiled eBPF blob (arch={blob_arch}) — \
@@ -85,15 +99,8 @@ fn try_build_ebpf() -> Option<PathBuf> {
         return None;
     }
 
-    // Check that cargo +nightly is available
-    let nightly_ok = Command::new("cargo")
-        .args(["+nightly", "--version"])
-        .output()
-        .map_or(false, |o| o.status.success());
-    if !nightly_ok {
-        println!("cargo:warning=Nightly toolchain not available, skipping eBPF from-source build");
-        return None;
-    }
+    // Ensure build prerequisites are available, installing if needed.
+    ensure_ebpf_toolchain();
 
     // Nested cargo invocations inherit env vars that cause conflicts.
     // Clear CARGO_* vars that interfere with the inner build.
@@ -165,6 +172,62 @@ fn try_build_ebpf() -> Option<PathBuf> {
         Err(e) => {
             println!("cargo:warning=Could not invoke cargo for eBPF build: {e}");
             None
+        }
+    }
+}
+
+/// Ensure nightly toolchain, rust-src, and bpf-linker are available.
+/// Installs any missing prerequisites automatically.
+fn ensure_ebpf_toolchain() {
+    // 1. Nightly toolchain
+    let nightly_ok = Command::new("cargo")
+        .args(["+nightly", "--version"])
+        .output()
+        .map_or(false, |o| o.status.success());
+    if !nightly_ok {
+        println!("cargo:warning=Installing nightly toolchain for eBPF build...");
+        let ok = Command::new("rustup")
+            .args(["toolchain", "install", "nightly"])
+            .status()
+            .map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install nightly toolchain");
+            return;
+        }
+    }
+
+    // 2. rust-src component (needed for -Z build-std=core)
+    let rust_src_ok = Command::new("rustup")
+        .args(["component", "list", "--toolchain", "nightly", "--installed"])
+        .output()
+        .map_or(false, |o| {
+            String::from_utf8_lossy(&o.stdout).lines().any(|l| l.starts_with("rust-src"))
+        });
+    if !rust_src_ok {
+        println!("cargo:warning=Installing rust-src for nightly toolchain...");
+        let ok = Command::new("rustup")
+            .args(["component", "add", "rust-src", "--toolchain", "nightly"])
+            .status()
+            .map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install rust-src component");
+            return;
+        }
+    }
+
+    // 3. bpf-linker
+    let linker_ok = Command::new("bpf-linker")
+        .arg("--version")
+        .output()
+        .map_or(false, |o| o.status.success());
+    if !linker_ok {
+        println!("cargo:warning=Installing bpf-linker (this may take a few minutes)...");
+        let ok = Command::new("cargo")
+            .args(["+nightly", "install", "bpf-linker"])
+            .status()
+            .map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install bpf-linker");
         }
     }
 }

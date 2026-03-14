@@ -34,6 +34,20 @@ fn main() {
                 } else {
                     "unknown".into()
                 };
+                // Reject precompiled blob if it was built for a different architecture.
+                // pt_regs layout differs between architectures, so a mismatched blob
+                // will silently read wrong registers — fail the build instead.
+                if blob_arch != host_arch && blob_arch != "unknown" && host_arch != "unknown" {
+                    panic!(
+                        "Precompiled eBPF blob is for {blob_arch} but host is {host_arch}, \
+                         and from-source build failed.\n\
+                         Install the prerequisites and rebuild:\n  \
+                         rustup toolchain install nightly\n  \
+                         rustup component add rust-src --toolchain nightly\n  \
+                         cargo +nightly install bpf-linker\n  \
+                         cargo build --features trace"
+                    );
+                }
                 println!("cargo:rustc-env=TUISHARK_EBPF_ARCH={blob_arch}");
                 println!(
                     "cargo:warning=Using precompiled eBPF blob (arch={blob_arch}) — \
@@ -85,13 +99,9 @@ fn try_build_ebpf() -> Option<PathBuf> {
         return None;
     }
 
-    // Check that cargo +nightly is available
-    let nightly_ok = Command::new("cargo")
-        .args(["+nightly", "--version"])
-        .output()
-        .map_or(false, |o| o.status.success());
-    if !nightly_ok {
-        println!("cargo:warning=Nightly toolchain not available, skipping eBPF from-source build");
+    // Ensure build prerequisites are available, installing if opted in.
+    if !ensure_ebpf_toolchain() {
+        println!("cargo:warning=eBPF toolchain prerequisites not available, skipping from-source build");
         return None;
     }
 
@@ -167,4 +177,110 @@ fn try_build_ebpf() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Ensure nightly toolchain, rust-src, and bpf-linker are available.
+/// Returns true if all prerequisites are present (or were installed successfully).
+///
+/// Auto-installation only runs when `TUISHARK_AUTO_INSTALL_DEPS=1` is set.
+/// Without it, missing prerequisites cause a warning and return false.
+fn ensure_ebpf_toolchain() -> bool {
+    let auto_install = env::var("TUISHARK_AUTO_INSTALL_DEPS").unwrap_or_default() == "1";
+
+    // Helper: build a Command with the outer cargo env vars stripped,
+    // so installs don't inherit RUSTFLAGS, RUSTC_WRAPPER, etc.
+    let clean_cargo = || {
+        let mut cmd = Command::new("cargo");
+        for (key, _) in env::vars() {
+            if (key.starts_with("CARGO_") && key != "CARGO_HOME") || key == "RUSTUP_TOOLCHAIN" {
+                cmd.env_remove(&key);
+            }
+        }
+        cmd.env_remove("RUSTC");
+        cmd.env_remove("RUSTC_WRAPPER");
+        cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
+        cmd.env_remove("RUSTFLAGS");
+        cmd.env_remove("CARGO_ENCODED_RUSTFLAGS");
+        cmd
+    };
+
+    // 1. Nightly toolchain
+    let nightly_ok = Command::new("cargo")
+        .args(["+nightly", "--version"])
+        .output()
+        .map_or(false, |o| o.status.success());
+    if !nightly_ok {
+        if !auto_install {
+            println!(
+                "cargo:warning=Nightly toolchain not available. Set \
+                 TUISHARK_AUTO_INSTALL_DEPS=1 to auto-install, or run: \
+                 rustup toolchain install nightly"
+            );
+            return false;
+        }
+        println!("cargo:warning=Installing nightly toolchain for eBPF build...");
+        let ok = Command::new("rustup")
+            .args(["toolchain", "install", "nightly"])
+            .status()
+            .map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install nightly toolchain");
+            return false;
+        }
+    }
+
+    // 2. rust-src component (needed for -Z build-std=core)
+    let rust_src_ok = Command::new("rustup")
+        .args(["component", "list", "--toolchain", "nightly", "--installed"])
+        .output()
+        .map_or(false, |o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.starts_with("rust-src"))
+        });
+    if !rust_src_ok {
+        if !auto_install {
+            println!(
+                "cargo:warning=rust-src not available for nightly. Set \
+                 TUISHARK_AUTO_INSTALL_DEPS=1 to auto-install, or run: \
+                 rustup component add rust-src --toolchain nightly"
+            );
+            return false;
+        }
+        println!("cargo:warning=Installing rust-src for nightly toolchain...");
+        let ok = Command::new("rustup")
+            .args(["component", "add", "rust-src", "--toolchain", "nightly"])
+            .status()
+            .map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install rust-src component");
+            return false;
+        }
+    }
+
+    // 3. bpf-linker
+    let linker_ok = Command::new("bpf-linker")
+        .arg("--version")
+        .output()
+        .map_or(false, |o| o.status.success());
+    if !linker_ok {
+        if !auto_install {
+            println!(
+                "cargo:warning=bpf-linker not available. Set \
+                 TUISHARK_AUTO_INSTALL_DEPS=1 to auto-install, or run: \
+                 cargo +nightly install bpf-linker"
+            );
+            return false;
+        }
+        println!("cargo:warning=Installing bpf-linker (this may take a few minutes)...");
+        let mut cmd = clean_cargo();
+        cmd.args(["+nightly", "install", "bpf-linker"]);
+        let ok = cmd.status().map_or(false, |s| s.success());
+        if !ok {
+            println!("cargo:warning=Failed to install bpf-linker");
+            return false;
+        }
+    }
+
+    true
 }

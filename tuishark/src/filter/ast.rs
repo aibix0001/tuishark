@@ -33,6 +33,15 @@ pub enum Field {
     Proto,
     Len,
     Info,
+    // pflog link-layer fields
+    PfAction,
+    PfDirection,
+    PfIfname,
+    PfRule,
+    PfReason,
+    // enc (IPsec) link-layer fields
+    EncSpi,
+    EncFlags,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

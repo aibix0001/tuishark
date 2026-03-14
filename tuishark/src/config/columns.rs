@@ -13,9 +13,18 @@ pub enum Column {
     Protocol,
     Length,
     Info,
+    // Link-layer metadata (optional, not in default set)
+    PfAction,
+    PfDirection,
+    PfInterface,
+    PfRule,
+    PfReason,
+    EncSpi,
+    EncFlags,
 }
 
 impl Column {
+    /// Default visible columns (standard packet table).
     pub const ALL: &[Column] = &[
         Column::No,
         Column::Time,
@@ -24,6 +33,17 @@ impl Column {
         Column::Protocol,
         Column::Length,
         Column::Info,
+    ];
+
+    /// Link-layer metadata columns (pflog/enc — not in default visible set).
+    pub const LINK_META: &[Column] = &[
+        Column::PfAction,
+        Column::PfDirection,
+        Column::PfInterface,
+        Column::PfRule,
+        Column::PfReason,
+        Column::EncSpi,
+        Column::EncFlags,
     ];
 
     pub fn header(&self) -> &'static str {
@@ -35,6 +55,13 @@ impl Column {
             Column::Protocol => "Proto",
             Column::Length => "Len",
             Column::Info => "Info",
+            Column::PfAction => "Action",
+            Column::PfDirection => "Dir",
+            Column::PfInterface => "Interface",
+            Column::PfRule => "Rule#",
+            Column::PfReason => "Reason",
+            Column::EncSpi => "SPI",
+            Column::EncFlags => "Flags",
         }
     }
 
@@ -47,6 +74,13 @@ impl Column {
             Column::Protocol => 8,
             Column::Length => 6,
             Column::Info => 0, // Min(20) — flexible
+            Column::PfAction => 8,
+            Column::PfDirection => 5,
+            Column::PfInterface => 12,
+            Column::PfRule => 6,
+            Column::PfReason => 14,
+            Column::EncSpi => 12,
+            Column::EncFlags => 10,
         }
     }
 }
@@ -112,5 +146,31 @@ mod tests {
         let toml = toml::to_string(&config).unwrap();
         let parsed: ColumnConfig = toml::from_str(&toml).unwrap();
         assert_eq!(parsed.visible.len(), config.visible.len());
+    }
+
+    #[test]
+    fn link_meta_columns_not_in_default() {
+        let config = ColumnConfig::default();
+        for col in Column::LINK_META {
+            assert!(!config.visible.contains(col));
+        }
+    }
+
+    #[test]
+    fn serde_pf_columns() {
+        let toml = r#"visible = ["pfaction", "pfdirection", "pfinterface", "pfrule", "pfreason", "encspi", "encflags"]"#;
+        let config: ColumnConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.visible.len(), 7);
+        assert_eq!(config.visible[0], Column::PfAction);
+        assert_eq!(config.visible[1], Column::PfDirection);
+        assert_eq!(config.visible[2], Column::PfInterface);
+        assert_eq!(config.visible[3], Column::PfRule);
+        assert_eq!(config.visible[4], Column::PfReason);
+        assert_eq!(config.visible[5], Column::EncSpi);
+        assert_eq!(config.visible[6], Column::EncFlags);
+        // Round-trip
+        let serialized = toml::to_string(&config).unwrap();
+        let parsed: ColumnConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.visible, config.visible);
     }
 }

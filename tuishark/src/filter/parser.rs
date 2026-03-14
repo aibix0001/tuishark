@@ -9,6 +9,9 @@
 ///   comparison = field compare_op value
 ///   contains   = field "contains" quoted_string
 ///   field    = "ip.src" | "ip.dst" | "ip.addr" | "port.src" | "port.dst" | "port" | "proto" | "len" | "info"
+///            | "pf.action" | "pf.direction" | "pf.dir" | "pf.ifname" | "pf.interface" | "pf.rule" | "pf.reason"
+///            | "enc.spi" | "enc.flags"
+///   value    supports hex literals: 0x1234 → parsed as integer
 ///   compare_op = "==" | "!=" | ">" | "<" | ">=" | "<="
 ///   value    = integer | string
 
@@ -126,10 +129,23 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 "proto" => tokens.push(Token::Field(Field::Proto)),
                 "len" => tokens.push(Token::Field(Field::Len)),
                 "info" => tokens.push(Token::Field(Field::Info)),
+                "pf.action" => tokens.push(Token::Field(Field::PfAction)),
+                "pf.direction" | "pf.dir" => tokens.push(Token::Field(Field::PfDirection)),
+                "pf.ifname" | "pf.interface" => tokens.push(Token::Field(Field::PfIfname)),
+                "pf.rule" => tokens.push(Token::Field(Field::PfRule)),
+                "pf.reason" => tokens.push(Token::Field(Field::PfReason)),
+                "enc.spi" => tokens.push(Token::Field(Field::EncSpi)),
+                "enc.flags" => tokens.push(Token::Field(Field::EncFlags)),
                 _ => {
-                    // Try as integer
+                    // Try as integer (decimal or hex 0x prefix)
                     if let Ok(n) = word.parse::<u64>() {
                         tokens.push(Token::Int(n));
+                    } else if let Some(hex) = lower.strip_prefix("0x") {
+                        if let Ok(n) = u64::from_str_radix(hex, 16) {
+                            tokens.push(Token::Int(n));
+                        } else {
+                            tokens.push(Token::Str(word));
+                        }
                     } else {
                         // Unquoted string value (e.g., protocol name, IP address)
                         tokens.push(Token::Str(word));
@@ -353,5 +369,96 @@ mod tests {
     #[test]
     fn parse_missing_paren() {
         assert!(parse("(proto == tcp").is_err());
+    }
+
+    #[test]
+    fn parse_pf_action() {
+        let expr = parse("pf.action == block").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PfAction,
+                op: CompareOp::Eq,
+                value: Value::Str("block".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pf_direction_alias() {
+        let expr = parse("pf.dir == in").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PfDirection,
+                op: CompareOp::Eq,
+                value: Value::Str("in".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pf_ifname_alias() {
+        let expr = parse("pf.interface == em0").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PfIfname,
+                op: CompareOp::Eq,
+                value: Value::Str("em0".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_enc_spi() {
+        let expr = parse("enc.spi == 12345").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::EncSpi,
+                op: CompareOp::Eq,
+                value: Value::Int(12345),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hex_literal() {
+        let expr = parse("enc.spi == 0x12345678").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::EncSpi,
+                op: CompareOp::Eq,
+                value: Value::Int(0x12345678),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_hex_literal_uppercase() {
+        let expr = parse("enc.spi == 0xFF").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::EncSpi,
+                op: CompareOp::Eq,
+                value: Value::Int(255),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pf_reason() {
+        let expr = parse("pf.reason == match").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PfReason,
+                op: CompareOp::Eq,
+                value: Value::Str("match".into()),
+            }
+        );
     }
 }

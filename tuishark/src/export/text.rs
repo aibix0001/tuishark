@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use crate::store::packet_store::PacketStore;
 
 /// Write packets as a human-readable fixed-width text table.
@@ -73,7 +73,7 @@ pub fn export_text<W: Write>(
 }
 
 fn write_text_row<W: Write>(writer: &mut W, pkt: &PacketSummary) -> Result<()> {
-    writeln!(
+    write!(
         writer,
         "{:>6}  {:>12.6}  {:<45}  {:<45}  {:<10}  {:>6}  {}",
         pkt.index + 1,
@@ -84,13 +84,33 @@ fn write_text_row<W: Write>(writer: &mut W, pkt: &PacketSummary) -> Result<()> {
         pkt.original_length,
         pkt.info,
     )?;
+    match &pkt.link_meta {
+        Some(LinkMeta::Pflog(m)) => {
+            write!(
+                writer,
+                "  [pf: {} {} if={} rule={} reason={}]",
+                m.action, m.direction, m.ifname, m.rule_number,
+                model::pflog_reason_str(m.reason),
+            )?;
+        }
+        Some(LinkMeta::Enc(m)) => {
+            write!(
+                writer,
+                "  [enc: spi=0x{:08x} flags={}]",
+                m.spi,
+                model::enc_flags_str(m.flags),
+            )?;
+        }
+        None => {}
+    }
+    writeln!(writer)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{EncMeta, PfAction, PfDirection, PflogMeta, Protocol};
 
     fn make_store(n: usize) -> PacketStore {
         let mut store = PacketStore::default();
@@ -173,6 +193,63 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         // Full IPv6 address should be present (45-char column)
         assert!(output.contains("2001:0db8:85a3:0000:0000:8a2e:0370:7334"));
+    }
+
+    #[test]
+    fn text_pflog_annotation() {
+        let mut store = PacketStore::default();
+        let pkt = PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Pflog,
+            length: 100,
+            original_length: 100,
+            info: "block in on em0".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Pflog(PflogMeta {
+                action: PfAction::Block,
+                direction: PfDirection::In,
+                ifname: "em0".into(),
+                rule_number: 42,
+                reason: 0,
+                header_len: 100,
+            })),
+        };
+        store.add(pkt, vec![0u8; 100]);
+        let mut buf = Vec::new();
+        export_text(&mut buf, &store, None, None, false, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("[pf: block in if=em0 rule=42 reason=match]"));
+    }
+
+    #[test]
+    fn text_enc_annotation() {
+        let mut store = PacketStore::default();
+        let pkt = PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Enc,
+            length: 200,
+            original_length: 200,
+            info: "IPsec tunnel".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Enc(EncMeta {
+                address_family: 2,
+                spi: 0x12345678,
+                flags: 3,
+            })),
+        };
+        store.add(pkt, vec![0u8; 200]);
+        let mut buf = Vec::new();
+        export_text(&mut buf, &store, None, None, false, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("[enc: spi=0x12345678 flags=auth+conf]"));
     }
 
     #[test]

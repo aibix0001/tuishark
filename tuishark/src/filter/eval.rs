@@ -1,6 +1,6 @@
 /// Evaluate a filter expression against a PacketSummary.
 
-use crate::dissect::model::PacketSummary;
+use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use super::ast::{CompareOp, Expr, Field, Value};
 
 #[must_use]
@@ -25,6 +25,45 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
         Field::Proto => cmp_proto(pkt, op, value),
         Field::Len => cmp_int(pkt.original_length as u64, op, value),
         Field::Info => cmp_str(&pkt.info, op, value),
+        Field::PfAction => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
+                Some(s) => cmp_str(s, op, value),
+                None => cmp_str(&m.action.to_string(), op, value),
+            },
+            _ => false,
+        },
+        Field::PfDirection => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => match m.direction.as_str() {
+                Some(s) => cmp_str(s, op, value),
+                None => cmp_str(&m.direction.to_string(), op, value),
+            },
+            _ => false,
+        },
+        Field::PfIfname => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => cmp_str(&m.ifname, op, value),
+            _ => false,
+        },
+        Field::PfRule => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => cmp_int(m.rule_number as u64, op, value),
+            _ => false,
+        },
+        Field::PfReason => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => cmp_str(model::pflog_reason_str(m.reason), op, value),
+            _ => false,
+        },
+        Field::EncSpi => match &pkt.link_meta {
+            Some(LinkMeta::Enc(m)) => cmp_int(m.spi as u64, op, value),
+            _ => false,
+        },
+        Field::EncFlags => match &pkt.link_meta {
+            Some(LinkMeta::Enc(m)) => match value {
+                // String value: compare against decoded flag name
+                Value::Str(_) => cmp_str(model::enc_flags_str(m.flags), op, value),
+                // Integer value: compare raw bitmask
+                Value::Int(_) => cmp_int(m.flags as u64, op, value),
+            },
+            _ => false,
+        },
     }
 }
 
@@ -39,8 +78,35 @@ fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
         }
         Field::Info => str_contains_lower(&pkt.info, needle),
         Field::Proto => pkt.protocol.contains_lower(needle),
+        Field::PfAction => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
+                Some(s) => str_contains_lower(s, needle),
+                None => str_contains_lower(&m.action.to_string(), needle),
+            },
+            _ => false,
+        },
+        Field::PfDirection => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => match m.direction.as_str() {
+                Some(s) => str_contains_lower(s, needle),
+                None => str_contains_lower(&m.direction.to_string(), needle),
+            },
+            _ => false,
+        },
+        Field::PfIfname => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => str_contains_lower(&m.ifname, needle),
+            _ => false,
+        },
+        Field::PfReason => match &pkt.link_meta {
+            Some(LinkMeta::Pflog(m)) => str_contains_lower(model::pflog_reason_str(m.reason), needle),
+            _ => false,
+        },
+        Field::EncFlags => match &pkt.link_meta {
+            Some(LinkMeta::Enc(m)) => str_contains_lower(model::enc_flags_str(m.flags), needle),
+            _ => false,
+        },
         // contains doesn't make sense for numeric fields, but handle gracefully
-        Field::PortSrc | Field::PortDst | Field::Port | Field::Len => false,
+        Field::PortSrc | Field::PortDst | Field::Port | Field::Len
+        | Field::PfRule | Field::EncSpi => false,
     }
 }
 
@@ -147,7 +213,7 @@ fn cmp_proto(pkt: &PacketSummary, op: &CompareOp, value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dissect::model::Protocol;
+    use crate::dissect::model::{EncMeta, PfAction, PfDirection, PflogMeta, Protocol};
     use crate::filter::parser;
 
     fn sample_pkt() -> PacketSummary {
@@ -299,6 +365,144 @@ mod tests {
         assert!(super::matches(&expr, &pkt));
         let expr = parser::parse("ip.addr contains \"8.8.8\"").unwrap();
         assert!(!super::matches(&expr, &pkt));
+    }
+
+    fn pflog_pkt() -> PacketSummary {
+        PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "192.168.1.10".into(),
+            destination: "10.0.0.1".into(),
+            protocol: Protocol::Pflog,
+            length: 100,
+            original_length: 100,
+            info: "block in on em0".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Pflog(PflogMeta {
+                action: PfAction::Block,
+                direction: PfDirection::In,
+                ifname: "em0".into(),
+                rule_number: 42,
+                reason: 0,
+                header_len: 100,
+            })),
+        }
+    }
+
+    fn enc_pkt() -> PacketSummary {
+        PacketSummary {
+            index: 0,
+            timestamp: 0.0,
+            source: "10.0.0.1".into(),
+            destination: "10.0.0.2".into(),
+            protocol: Protocol::Enc,
+            length: 200,
+            original_length: 200,
+            info: "IPsec tunnel".into(),
+            src_port: None,
+            dst_port: None,
+            link_meta: Some(LinkMeta::Enc(EncMeta {
+                address_family: 2,
+                spi: 0x12345678,
+                flags: 3,
+            })),
+        }
+    }
+
+    #[test]
+    fn pflog_action_filter() {
+        let expr = parser::parse("pf.action == block").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.action == pass").unwrap();
+        assert!(!matches(&expr, &pflog_pkt()));
+    }
+
+    #[test]
+    fn pflog_ifname_filter() {
+        let expr = parser::parse("pf.ifname == em0").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.ifname == em1").unwrap();
+        assert!(!matches(&expr, &pflog_pkt()));
+    }
+
+    #[test]
+    fn pflog_rule_filter() {
+        let expr = parser::parse("pf.rule == 42").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.rule == 99").unwrap();
+        assert!(!matches(&expr, &pflog_pkt()));
+    }
+
+    #[test]
+    fn enc_spi_filter() {
+        let expr = parser::parse("enc.spi == 305419896").unwrap(); // 0x12345678
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.spi == 0").unwrap();
+        assert!(!matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
+    fn enc_flags_filter() {
+        // Raw integer comparison still works
+        let expr = parser::parse("enc.flags == 3").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
+    fn enc_flags_string_filter() {
+        // Decoded string comparison: display shows "auth+conf", filter should match
+        let expr = parser::parse("enc.flags == \"auth+conf\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags == auth").unwrap();
+        assert!(!matches(&expr, &enc_pkt())); // flags=3 is auth+conf, not just auth
+    }
+
+    #[test]
+    fn enc_flags_contains_filter() {
+        let expr = parser::parse("enc.flags contains \"auth\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags contains \"conf\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags contains \"none\"").unwrap();
+        assert!(!matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
+    fn pf_filter_no_meta() {
+        // pf.* filters return false on non-pflog packets
+        let pkt = sample_pkt();
+        let expr = parser::parse("pf.action == block").unwrap();
+        assert!(!matches(&expr, &pkt));
+        let expr = parser::parse("pf.ifname == em0").unwrap();
+        assert!(!matches(&expr, &pkt));
+        let expr = parser::parse("enc.spi == 12345").unwrap();
+        assert!(!matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn pflog_reason_filter() {
+        let expr = parser::parse("pf.reason == match").unwrap();
+        assert!(matches(&expr, &pflog_pkt())); // reason=0 → "match"
+        let expr = parser::parse("pf.reason == \"bad-offset\"").unwrap();
+        assert!(!matches(&expr, &pflog_pkt()));
+    }
+
+    #[test]
+    fn enc_spi_hex_filter() {
+        // Users write hex — verify it works after hex literal parsing
+        let expr = parser::parse("enc.spi == 0x12345678").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
+    fn pflog_contains_filter() {
+        let expr = parser::parse("pf.action contains \"blo\"").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.ifname contains \"em\"").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
+        let expr = parser::parse("pf.direction contains \"in\"").unwrap();
+        assert!(matches(&expr, &pflog_pkt()));
     }
 
     #[test]

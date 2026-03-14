@@ -56,7 +56,12 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
             _ => false,
         },
         Field::EncFlags => match &pkt.link_meta {
-            Some(LinkMeta::Enc(m)) => cmp_int(m.flags as u64, op, value),
+            Some(LinkMeta::Enc(m)) => match value {
+                // String value: compare against decoded flag name
+                Value::Str(_) => cmp_str(model::enc_flags_str(m.flags), op, value),
+                // Integer value: compare raw bitmask
+                Value::Int(_) => cmp_int(m.flags as u64, op, value),
+            },
             _ => false,
         },
     }
@@ -95,9 +100,13 @@ fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
             Some(LinkMeta::Pflog(m)) => str_contains_lower(model::pflog_reason_str(m.reason), needle),
             _ => false,
         },
+        Field::EncFlags => match &pkt.link_meta {
+            Some(LinkMeta::Enc(m)) => str_contains_lower(model::enc_flags_str(m.flags), needle),
+            _ => false,
+        },
         // contains doesn't make sense for numeric fields, but handle gracefully
         Field::PortSrc | Field::PortDst | Field::Port | Field::Len
-        | Field::PfRule | Field::EncSpi | Field::EncFlags => false,
+        | Field::PfRule | Field::EncSpi => false,
     }
 }
 
@@ -435,8 +444,28 @@ mod tests {
 
     #[test]
     fn enc_flags_filter() {
+        // Raw integer comparison still works
         let expr = parser::parse("enc.flags == 3").unwrap();
         assert!(matches(&expr, &enc_pkt()));
+    }
+
+    #[test]
+    fn enc_flags_string_filter() {
+        // Decoded string comparison: display shows "auth+conf", filter should match
+        let expr = parser::parse("enc.flags == \"auth+conf\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags == auth").unwrap();
+        assert!(!matches(&expr, &enc_pkt())); // flags=3 is auth+conf, not just auth
+    }
+
+    #[test]
+    fn enc_flags_contains_filter() {
+        let expr = parser::parse("enc.flags contains \"auth\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags contains \"conf\"").unwrap();
+        assert!(matches(&expr, &enc_pkt()));
+        let expr = parser::parse("enc.flags contains \"none\"").unwrap();
+        assert!(!matches(&expr, &enc_pkt()));
     }
 
     #[test]

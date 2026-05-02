@@ -67,7 +67,7 @@ impl Widget for AiOverlay<'_> {
 
         // Outer block
         let outer_block = Block::default()
-            .title(" AI Packet Analysis ")
+            .title(" AI Packet Info ")
             .borders(Borders::ALL)
             .style(Style::default().fg(self.theme.text).bg(self.theme.base))
             .border_style(Style::default().fg(self.theme.lavender));
@@ -113,34 +113,39 @@ impl Widget for AiOverlay<'_> {
         // Determine status dot color and label, and explanation text
         let (status_dot, dot_color, status_label, explanation) = match self.ai_state {
             AiState::Idle => (
-                "●",
-                self.theme.green,
-                " Ready — press Space to explain",
+                " ",
+                self.theme.surface1,
+                "",
                 String::new(),
             ),
             AiState::Loading { .. } => (
                 "●",
                 self.theme.green,
-                " Loading…",
+                " Requesting explanation...",
                 String::new(),
             ),
             AiState::Ready(text) => (
                 "●",
                 self.theme.green,
-                " Done",
+                " Explanation ready",
                 text.clone(),
             ),
             AiState::Error(msg) => (
                 "●",
                 self.theme.red,
-                " Error",
+                "",
                 msg.clone(),
             ),
             AiState::Unconfigured => (
                 "●",
                 self.theme.red,
-                " Not configured — set AI_API_KEY",
-                String::new(),
+                " AI not configured — add [ai] section to config.toml",
+                "AI not configured.\n\nAdd [ai] section to ~/.config/tuishark/config.toml:\n\n\
+                 [ai]\n\
+                 enabled = true\n\
+                 base_url = \"http://localhost:8100/v1\"\n\
+                 model = \"your-model\""
+                    .into(),
             ),
         };
 

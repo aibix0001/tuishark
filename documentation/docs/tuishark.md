@@ -47,8 +47,9 @@ cargo build --release
 | `j` / `k` or Arrow keys | Navigate packets or layers |
 | `g` / `G` | Jump to first / last packet |
 | `PageUp` / `PageDown` | Jump 20 packets |
-| `Tab` / `Shift+Tab` | Cycle panes forward / backward |
-| `1` / `2` / `3` / `4` | Focus packet table / detail tree / hex view / kernel trace |
+| `Tab` / `Shift+Tab` | Cycle packet table, detail tree, and hex view forward / backward |
+| `1` / `2` / `3` | Focus packet table / detail tree / hex view |
+| `4` | Show / hide kernel trace overlay |
 | `Enter` or `Space` | Expand/collapse protocol layer |
 | `/` | Open filter bar (type expression, Enter to apply, Esc to cancel) |
 | `s` | Open save dialog |
@@ -59,7 +60,7 @@ cargo build --release
 | `e` | Open export dialog (CSV, JSON, Text) |
 | `Esc` | Stop live capture |
 | `f` | Toggle auto-scroll during live capture |
-| `z` | Zoom / unzoom active pane (fills content area) |
+| `z` | Zoom / unzoom active packet, detail, or hex pane (fills content area) |
 | `ä` / `ö` | Select next / previous packet (works in any pane, including zoomed) |
 | `p` | Open filter presets picker |
 | `q` or `Ctrl+C` | Quit (prompts to save if unsaved) |
@@ -154,7 +155,7 @@ Set `[display] timestamp_format` to control the time column in the packet table:
 
 ### Architecture
 
-The application follows a 4-pane layout:
+The application follows a 3-pane layout with a floating trace overlay:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -164,13 +165,13 @@ The application follows a 4-pane layout:
 ├─────────────────────────────────────────┤
 │ Packet Table (virtual scrolling)        │
 ├─────────────────────────────────────────┤
-│ Detail Tree (collapsible protocol layers│
-├───────────────────┬─────────────────────┤
-│ Hex Dump          │ Kernel Trace (TBD)  │
+│ Detail Tree (70%)     │ Hex Dump (30%)  │
 ├───────────────────┴─────────────────────┤
 │ Status Bar (packet count, selection)    │
 └─────────────────────────────────────────┘
 ```
+
+Press `4` to show or hide the Kernel Trace overlay. The overlay is centered over the normal layout and uses about 80% of the terminal width and height.
 
 ### Two-tier packet dissection
 
@@ -245,7 +246,7 @@ The filter applies as a view layer — no packets are deleted, just hidden. Duri
 
 ### eBPF kernel tracing (Phase 6)
 
-TuiShark can use eBPF to identify which process (PID, process name, UID) sent or received each packet during live capture. This is displayed in the Kernel Trace pane (bottom-right).
+TuiShark can use eBPF to identify which process (PID, process name, UID) sent or received each packet during live capture. This is displayed in the floating Kernel Trace overlay.
 
 **Requirements:**
 - Build with `cargo build --features trace`
@@ -259,7 +260,7 @@ TuiShark can use eBPF to identify which process (PID, process name, UID) sent or
 - When pcap captures a packet, TuiShark looks up the 5-tuple in the eBPF map to find the process
 - Only works for TCP/UDP packets during live capture; file mode shows "N/A"
 
-**Graceful fallback:** If eBPF is unavailable (no permissions, old kernel, not compiled with the feature), the app continues to work normally — only the Kernel Trace pane shows a status message instead of process info.
+**Graceful fallback:** If eBPF is unavailable (no permissions, old kernel, not compiled with the feature), the app continues to work normally — the Kernel Trace overlay shows a status message instead of process info.
 
 ### Statistics & analytics (Phase 7)
 

@@ -39,7 +39,7 @@ impl AppLayout {
                 Pane::PacketTable => (content, zero, zero, zero),
                 Pane::DetailTree => (zero, content, zero, zero),
                 Pane::HexView    => (zero, zero, content, zero),
-                Pane::KernelTrace => (zero, zero, zero, content),
+                Pane::KernelTrace => (zero, zero, zero, zero),
             };
             return Self {
                 header, filter_bar,
@@ -50,11 +50,9 @@ impl AppLayout {
         }
 
         // Normal (non-zoomed) layout
-        const DETAIL_HEIGHT: u16 = 10;
-        const HEX_HEIGHT: u16 = 8;
-        const LOWER_HEIGHT: u16 = DETAIL_HEIGHT + HEX_HEIGHT;
+        const LOWER_HEIGHT: u16 = 18;
 
-        // Step 1: packet table on top, lower area (detail + hex | kernel trace) below
+        // Step 1: packet table on top, lower area (detail + hex) below
         let main_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -63,31 +61,22 @@ impl AppLayout {
             ])
             .split(content);
 
-        // Step 2: split lower area into left column and kernel trace (right)
+        // Step 2: split lower area into detail tree and hex dump
         let lower_cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
+                Constraint::Percentage(70),
+                Constraint::Percentage(30),
             ])
             .split(main_rows[1]);
-
-        // Step 3: split left column into detail tree (top) and hex dump (bottom)
-        let left_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(DETAIL_HEIGHT),
-                Constraint::Length(HEX_HEIGHT),
-            ])
-            .split(lower_cols[0]);
 
         Self {
             header,
             filter_bar,
             packet_table: main_rows[0],
-            detail_tree: left_rows[0],
-            hex_view: left_rows[1],
-            kernel_trace: lower_cols[1],
+            detail_tree: lower_cols[0],
+            hex_view: lower_cols[1],
+            kernel_trace: Rect::new(main_rows[1].x, main_rows[1].y, 0, 0),
             status_bar,
         }
     }
@@ -109,7 +98,8 @@ mod tests {
         assert!(layout.packet_table.height > 0);
         assert!(layout.detail_tree.height > 0);
         assert!(layout.hex_view.height > 0);
-        assert!(layout.kernel_trace.height > 0);
+        assert_eq!(layout.kernel_trace.height, 0);
+        assert_eq!(layout.kernel_trace.width, 0);
     }
 
     #[test]
@@ -140,36 +130,31 @@ mod tests {
     }
 
     #[test]
-    fn zoom_kernel_trace_fills_content() {
-        let layout = AppLayout::new(AREA, Some(Pane::KernelTrace));
-        assert_eq!(layout.packet_table.height, 0);
-        assert_eq!(layout.detail_tree.height, 0);
-        assert_eq!(layout.hex_view.height, 0);
-        assert!(layout.kernel_trace.height > 0);
-    }
-
-    #[test]
     fn zoomed_pane_gets_full_content_height() {
         let normal = AppLayout::new(AREA, None);
         let zoomed = AppLayout::new(AREA, Some(Pane::PacketTable));
         // Zoomed pane should be taller than the normal packet table
         assert!(zoomed.packet_table.height > normal.packet_table.height);
-        // Zoomed height equals packet_table + left column stack (detail + hex)
-        // (kernel_trace overlaps vertically with detail + hex, not additive)
-        let left_stack = normal.packet_table.height
-            + normal.detail_tree.height
-            + normal.hex_view.height;
-        assert_eq!(zoomed.packet_table.height, left_stack);
+        assert_eq!(
+            zoomed.packet_table.height,
+            normal.packet_table.height + normal.detail_tree.height
+        );
     }
 
     #[test]
-    fn left_column_height_equals_right_column() {
+    fn detail_and_hex_share_lower_row() {
         let layout = AppLayout::new(AREA, None);
-        assert_eq!(
-            layout.detail_tree.height + layout.hex_view.height,
-            layout.kernel_trace.height,
-            "left column sub-panes should sum to kernel trace height"
-        );
+        assert_eq!(layout.detail_tree.y, layout.hex_view.y);
+        assert_eq!(layout.detail_tree.height, layout.hex_view.height);
+    }
+
+    #[test]
+    fn lower_row_uses_seventy_thirty_split() {
+        let layout = AppLayout::new(AREA, None);
+        let total = layout.detail_tree.width + layout.hex_view.width;
+        assert_eq!(total, AREA.width);
+        assert!((layout.detail_tree.width as i16 - 84).abs() <= 1);
+        assert!((layout.hex_view.width as i16 - 36).abs() <= 1);
     }
 
     #[test]
@@ -181,7 +166,7 @@ mod tests {
         // All panes should have some height
         assert!(layout.detail_tree.height > 0);
         assert!(layout.hex_view.height > 0);
-        assert!(layout.kernel_trace.height > 0);
+        assert_eq!(layout.kernel_trace.height, 0);
     }
 
     #[test]

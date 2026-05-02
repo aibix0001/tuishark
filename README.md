@@ -36,9 +36,14 @@ sudo apt install tshark
 git clone https://git.lab.aibix.io/aibix0001/tuishark.git
 cd tuishark
 cargo build --release
+
+# With eBPF kernel tracing support (requires nightly toolchain for eBPF crate)
+cargo build --release --features trace
 ```
 
 The binary is at `target/release/tuishark`.
+
+Note: The `--trace` and `--trace-path` CLI flags require building with `--features trace`. Without it, the default build supports all features except eBPF kernel tracing.
 
 ### Docker (multi-arch)
 

@@ -56,9 +56,10 @@ use crate::ui::dialogs::stats_dialog::StatsDialog;
 use crate::export::{ExportFormat, ExportStep};
 
 use ratatui::{
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -76,14 +77,14 @@ impl Pane {
         match self {
             Pane::PacketTable => Pane::DetailTree,
             Pane::DetailTree => Pane::HexView,
-            Pane::HexView => Pane::KernelTrace,
+            Pane::HexView => Pane::PacketTable,
             Pane::KernelTrace => Pane::PacketTable,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Pane::PacketTable => Pane::KernelTrace,
+            Pane::PacketTable => Pane::HexView,
             Pane::DetailTree => Pane::PacketTable,
             Pane::HexView => Pane::DetailTree,
             Pane::KernelTrace => Pane::HexView,
@@ -177,6 +178,7 @@ pub struct App {
     path_aggregator: PathAggregator,
     path_trace_state: PathTraceState,
     enable_trace_path: bool,
+    show_trace_overlay: bool,
     trace_scroll_offset: usize,
     /// Recent packet flow keys for path matching (packet_index, FlowKey).
     /// Kept as a sliding window of the last N packets for matching.
@@ -358,6 +360,7 @@ impl App {
             path_aggregator: PathAggregator::new(),
             path_trace_state,
             enable_trace_path,
+            show_trace_overlay: false,
             trace_scroll_offset: 0,
             recent_flow_keys: Vec::new(),
             // Export dialog
@@ -868,38 +871,6 @@ impl App {
             .map(|fk| fk.protocol)
             .unwrap_or(0);
 
-        // Kernel trace (Phase 6)
-        if layout.kernel_trace.height > 0 {
-            let trace_info = self
-                .selected_packet
-                .and_then(|idx| self.trace_store.get(idx));
-            let kernel_path = self
-                .selected_packet
-                .and_then(|idx| self.path_store.get(idx));
-            let container_info = self
-                .selected_packet
-                .and_then(|idx| self.container_store.get(idx));
-            let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
-            let mut trace_view = TraceView::new(
-                trace_info,
-                self.trace_state,
-                &self.theme,
-                self.active_pane == Pane::KernelTrace,
-            )
-            .with_container_info(container_info, selected_protocol)
-            .with_kernel_path(kernel_path)
-            .with_path_trace_state(self.path_trace_state)
-            .with_events_lost(events_lost)
-            .with_scroll_offset(self.trace_scroll_offset);
-            // Only compute BPF map entry count when needed for diagnostics
-            if trace_info.is_none() && self.trace_state == TraceState::Active {
-                if let Some(ref mut engine) = self.trace_engine {
-                    trace_view = trace_view.with_map_entries(engine.map_entry_count());
-                }
-            }
-            frame.render_widget(trace_view, layout.kernel_trace);
-        }
-
         // Status bar
         let filter_match = self.filtered_indices.as_ref().map(|fi| (fi.len(), self.store.len()));
         let status = StatusBar::new(
@@ -913,6 +884,10 @@ impl App {
             &self.theme,
         );
         frame.render_widget(status, layout.status_bar);
+
+        if self.show_trace_overlay {
+            self.render_trace_overlay(frame, selected_protocol);
+        }
 
         // Dialog overlays (priority order: help > quit > stats > ipinfo > container > export > save > open > preset > picker)
         if self.show_help_dialog {
@@ -1020,6 +995,50 @@ impl App {
         }
     }
 
+    fn render_trace_overlay(&mut self, frame: &mut ratatui::Frame, selected_protocol: u8) {
+        let area = Self::centered_percent_rect(frame.area(), 80, 80);
+        frame.render_widget(Clear, area);
+
+        let trace_info = self
+            .selected_packet
+            .and_then(|idx| self.trace_store.get(idx));
+        let kernel_path = self
+            .selected_packet
+            .and_then(|idx| self.path_store.get(idx));
+        let container_info = self
+            .selected_packet
+            .and_then(|idx| self.container_store.get(idx));
+        let events_lost = self.path_engine.as_ref().map_or(0, |pe| pe.events_lost);
+        let mut trace_view = TraceView::new(
+            trace_info,
+            self.trace_state,
+            &self.theme,
+            true,
+        )
+        .with_container_info(container_info, selected_protocol)
+        .with_kernel_path(kernel_path)
+        .with_path_trace_state(self.path_trace_state)
+        .with_events_lost(events_lost)
+        .with_scroll_offset(self.trace_scroll_offset);
+        // Only compute BPF map entry count when needed for diagnostics.
+        if trace_info.is_none() && self.trace_state == TraceState::Active {
+            if let Some(ref mut engine) = self.trace_engine {
+                trace_view = trace_view.with_map_entries(engine.map_entry_count());
+            }
+        }
+        frame.render_widget(trace_view, area);
+    }
+
+    fn centered_percent_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
+        let width = area.width.saturating_mul(width_percent).saturating_div(100);
+        let height = area.height.saturating_mul(height_percent).saturating_div(100);
+        let width = width.max(1).min(area.width);
+        let height = height.max(1).min(area.height);
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        Rect::new(x, y, width, height)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         // Clear status message on any key press
         self.status_message = None;
@@ -1069,6 +1088,10 @@ impl App {
             self.handle_filter_key(key);
             return;
         }
+        if self.show_trace_overlay && key.code == KeyCode::Esc {
+            self.show_trace_overlay = false;
+            return;
+        }
 
         // Global shortcuts via configurable key bindings
         if let Some(action) = self.key_bindings.action_for(&key) {
@@ -1102,7 +1125,7 @@ impl App {
                     return;
                 }
                 Action::FocusKernelTrace => {
-                    self.set_active_pane(Pane::KernelTrace);
+                    self.show_trace_overlay = !self.show_trace_overlay;
                     return;
                 }
                 Action::Save => {
@@ -1149,6 +1172,7 @@ impl App {
                 }
                 Action::TogglePathTrace => {
                     self.toggle_path_trace();
+                    self.show_trace_overlay = true;
                     return;
                 }
                 Action::Help => {
@@ -1165,6 +1189,9 @@ impl App {
                     return;
                 }
                 Action::ZoomPane => {
+                    if self.active_pane == Pane::KernelTrace {
+                        return;
+                    }
                     if self.zoomed_pane == Some(self.active_pane) {
                         self.zoomed_pane = None;
                     } else {
@@ -1183,11 +1210,15 @@ impl App {
                 // Navigation actions — dispatch to active pane
                 Action::MoveDown | Action::MoveUp | Action::MoveFirst | Action::MoveLast
                 | Action::PageDown | Action::PageUp | Action::ToggleExpand => {
-                    match self.active_pane {
-                        Pane::PacketTable => self.handle_packet_table_action(action),
-                        Pane::DetailTree => self.handle_detail_tree_action(action),
-                        Pane::KernelTrace => self.handle_trace_pane_action(action),
-                        Pane::HexView => {}
+                    if self.show_trace_overlay {
+                        self.handle_trace_pane_action(action);
+                    } else {
+                        match self.active_pane {
+                            Pane::PacketTable => self.handle_packet_table_action(action),
+                            Pane::DetailTree => self.handle_detail_tree_action(action),
+                            Pane::KernelTrace => {}
+                            Pane::HexView => {}
+                        }
                     }
                     return;
                 }
@@ -1537,6 +1568,9 @@ impl App {
             Action::MoveFirst => {
                 self.trace_scroll_offset = 0;
             }
+            Action::MoveLast => {
+                self.trace_scroll_offset = self.trace_scroll_offset.saturating_add(50);
+            }
             _ => {}
         }
     }
@@ -1748,6 +1782,10 @@ impl App {
 
     /// Switch the active pane, updating zoom target if currently zoomed.
     fn set_active_pane(&mut self, pane: Pane) {
+        if pane == Pane::KernelTrace {
+            self.show_trace_overlay = true;
+            return;
+        }
         self.active_pane = pane;
         if self.zoomed_pane.is_some() {
             self.zoomed_pane = Some(pane);
@@ -2954,16 +2992,54 @@ mod tests {
     fn pane_next_cycles() {
         assert_eq!(Pane::PacketTable.next(), Pane::DetailTree);
         assert_eq!(Pane::DetailTree.next(), Pane::HexView);
-        assert_eq!(Pane::HexView.next(), Pane::KernelTrace);
-        assert_eq!(Pane::KernelTrace.next(), Pane::PacketTable);
+        assert_eq!(Pane::HexView.next(), Pane::PacketTable);
     }
 
     #[test]
     fn pane_prev_cycles() {
-        assert_eq!(Pane::PacketTable.prev(), Pane::KernelTrace);
+        assert_eq!(Pane::PacketTable.prev(), Pane::HexView);
         assert_eq!(Pane::DetailTree.prev(), Pane::PacketTable);
         assert_eq!(Pane::HexView.prev(), Pane::DetailTree);
-        assert_eq!(Pane::KernelTrace.prev(), Pane::HexView);
+    }
+
+    #[test]
+    fn focus_kernel_trace_toggles_overlay() {
+        let mut app = App::new(None, None, false, false, false, Config::default());
+        assert!(!app.show_trace_overlay);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert!(app.show_trace_overlay);
+        assert_eq!(app.active_pane, Pane::PacketTable);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert!(!app.show_trace_overlay);
+    }
+
+    #[test]
+    fn trace_overlay_navigation_scrolls_trace() {
+        let mut app = App::new(None, None, false, false, false, Config::default());
+        app.show_trace_overlay = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.trace_scroll_offset, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.trace_scroll_offset, 6);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.trace_scroll_offset, 5);
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.trace_scroll_offset, 0);
+    }
+
+    #[test]
+    fn esc_hides_trace_overlay() {
+        let mut app = App::new(None, None, false, false, false, Config::default());
+        app.show_trace_overlay = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.show_trace_overlay);
     }
 
     #[test]

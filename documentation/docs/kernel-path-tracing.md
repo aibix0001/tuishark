@@ -71,7 +71,7 @@ Functions removed from path tracing (no `sk_buff *` argument):
 
 ## UI Display
 
-The Kernel Trace pane shows both process info (top) and path timeline (bottom):
+The Kernel Trace overlay shows both process info (top) and path timeline (bottom):
 
 ```
 +- Kernel Trace -----------------------------------------+
@@ -85,7 +85,7 @@ The Kernel Trace pane shows both process info (top) and path timeline (bottom):
 +---------------------------------------------------------+
 ```
 
-The pane supports scrolling with `j`/`k` when focused.
+Press `4` to show or hide the overlay. When it is visible, scroll it with `j`/`k`, arrow keys, `PageUp`/`PageDown`, `Home`, and `End`.
 
 ## Implementation Details
 

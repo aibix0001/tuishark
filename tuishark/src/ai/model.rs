@@ -95,6 +95,11 @@ impl AiCache {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
     fn touch(&mut self, packet_index: usize) {
         if let Some(pos) = self.order.iter().position(|&k| k == packet_index) {
             self.order.remove(pos);
@@ -261,5 +266,23 @@ mod tests {
         let json = r#"{"choices":[]}"#;
         let resp: ChatCompletionResponse = serde_json::from_str(json).unwrap();
         assert!(resp.choices.is_empty());
+    }
+
+    #[test]
+    fn cache_clear_removes_all_entries() {
+        let mut cache = AiCache::new(4);
+        cache.insert_whole(0, "old capture packet 0".into());
+        cache.insert_whole(1, "old capture packet 1".into());
+        cache.insert_field(0, 1, Some(0), "old field".into());
+
+        cache.clear();
+
+        assert_eq!(cache.get_whole(0), None);
+        assert_eq!(cache.get_whole(1), None);
+        assert_eq!(cache.get_field(0, 1, Some(0)), None);
+
+        // New data after clear works
+        cache.insert_whole(0, "new capture packet 0".into());
+        assert_eq!(cache.get_whole(0), Some("new capture packet 0".into()));
     }
 }

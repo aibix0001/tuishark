@@ -504,6 +504,8 @@ impl App {
         self.auto_scroll = self.config.display.auto_scroll;
         self.status_message = None;
         self.zoomed_pane = None;
+        self.ai_cache.clear();
+        self.ai_state = AiState::Idle;
         // Restore trace state for live capture
         if self.trace_engine.is_some() {
             self.trace_state = TraceState::Active;
@@ -1966,6 +1968,8 @@ impl App {
         self.path_store.clear();
         self.container_store.clear();
         self.recent_flow_keys.clear();
+        self.ai_cache.clear();
+        self.ai_state = AiState::Idle;
         self.trace_state = TraceState::FileMode;
         // Note: trace_engine stays as-is — it will be reused if the user starts live capture later
 

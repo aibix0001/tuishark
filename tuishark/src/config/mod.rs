@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod columns;
 pub mod filters;
 pub mod keys;
@@ -5,6 +6,7 @@ pub mod theme;
 
 use serde::{Deserialize, Serialize};
 
+use ai::AiConfig;
 use columns::ColumnConfig;
 use filters::FilterPreset;
 use keys::KeyConfig;
@@ -22,6 +24,7 @@ pub struct Config {
     pub export: ExportConfig,
     #[serde(rename = "filter")]
     pub filters: Vec<FilterPreset>,
+    pub ai: AiConfig,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             capture: CaptureConfig::default(),
             export: ExportConfig::default(),
             filters: Vec::new(),
+            ai: AiConfig::default(),
         }
     }
 }

@@ -928,7 +928,7 @@ impl App {
             frame.render_widget(overlay, frame.area());
         }
 
-        // Dialog overlays (priority order: help > quit > stats > ipinfo > container > export > save > open > preset > picker)
+        // Dialog overlays (priority order: help > quit > stats > ipinfo > container > ai_overlay > export > save > open > preset > picker)
         if self.show_help_dialog {
             // Compute content height for scroll clamping (dialog is 70% of area, minus chrome)
             let dialog_h = ((frame.area().height as u32 * 70 / 100) as u16).max(10);

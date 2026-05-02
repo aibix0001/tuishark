@@ -54,6 +54,10 @@ use crate::trace::path_store::PathStore;
 use crate::trace::store::TraceStore;
 use crate::ui::dialogs::stats_dialog::StatsDialog;
 use crate::export::{ExportFormat, ExportStep};
+use crate::ai::model::{AiCache, AiOverlayFocus, AiRequest, AiRequestKind, AiState};
+use crate::ai::context::{build_packet_context, build_field_context, build_whole_packet_messages, build_field_messages};
+use crate::ai::worker::AiWorker;
+use crate::ui::dialogs::ai_overlay::AiOverlay;
 
 use ratatui::{
     layout::Rect,
@@ -208,6 +212,14 @@ pub struct App {
     // Container context dialog
     show_container_dialog: bool,
     container_store: ContainerStore,
+    // AI packet info overlay (#41)
+    show_ai_overlay: bool,
+    ai_overlay_focus: AiOverlayFocus,
+    ai_right_scroll: usize,
+    ai_state: AiState,
+    ai_cache: AiCache,
+    ai_worker: Option<AiWorker>,
+    ai_seq: usize,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
     stats_tab: StatsTab,
@@ -288,6 +300,7 @@ impl App {
         let key_bindings = KeyBindings::from_config(&config.keys);
         let theme = Theme::from_flavor(config.theme.flavor);
         let auto_scroll = config.display.auto_scroll;
+        let ai_cache_size = config.ai.cache_size;
 
         // Apply default interface from config if no CLI interface specified
         let interface = interface.or_else(|| {
@@ -388,6 +401,14 @@ impl App {
             // Container context dialog
             show_container_dialog: false,
             container_store: ContainerStore::default(),
+            // AI packet info overlay
+            show_ai_overlay: false,
+            ai_overlay_focus: AiOverlayFocus::Left,
+            ai_right_scroll: 0,
+            ai_state: AiState::Idle,
+            ai_cache: AiCache::new(ai_cache_size),
+            ai_worker: None,
+            ai_seq: 0,
             // Statistics dialog
             show_stats_dialog: false,
             stats_tab: StatsTab::ProtocolHierarchy,
@@ -441,6 +462,9 @@ impl App {
 
             // Check for IP info lookup results
             self.drain_ipinfo_results();
+
+            // Check for AI overlay results
+            self.drain_ai_results();
 
             terminal.draw(|frame| self.render(frame))?;
 
@@ -889,6 +913,21 @@ impl App {
             self.render_trace_overlay(frame, selected_protocol);
         }
 
+        if self.show_ai_overlay {
+            let overlay = AiOverlay::new(
+                self.detail.as_ref(),
+                &self.expanded_layers,
+                self.selected_layer,
+                self.selected_field,
+                self.detail_scroll_offset,
+                self.ai_overlay_focus,
+                &self.ai_state,
+                self.ai_right_scroll,
+                &self.theme,
+            );
+            frame.render_widget(overlay, frame.area());
+        }
+
         // Dialog overlays (priority order: help > quit > stats > ipinfo > container > export > save > open > preset > picker)
         if self.show_help_dialog {
             // Compute content height for scroll clamping (dialog is 70% of area, minus chrome)
@@ -1064,6 +1103,10 @@ impl App {
             self.handle_container_key(key);
             return;
         }
+        if self.show_ai_overlay {
+            self.handle_ai_overlay_key(key);
+            return;
+        }
         if self.show_export_dialog {
             self.handle_export_dialog_key(key);
             return;
@@ -1199,6 +1242,10 @@ impl App {
                 }
                 Action::ContainerInfo => {
                     self.open_container_dialog();
+                    return;
+                }
+                Action::AiPacketInfo => {
+                    self.open_ai_overlay();
                     return;
                 }
                 Action::ZoomPane => {
@@ -2979,6 +3026,198 @@ impl App {
         }
         if key.code == KeyCode::Esc {
             self.show_container_dialog = false;
+        }
+    }
+
+    // ── AI overlay methods ──────────────────────────────────────────
+
+    fn drain_ai_results(&mut self) {
+        let Some(ref worker) = self.ai_worker else { return };
+        while let Some(resp) = worker.try_recv() {
+            let is_current = self.selected_packet == Some(resp.packet_index);
+            match resp.result {
+                Ok(text) => {
+                    match &resp.kind {
+                        AiRequestKind::WholePacket => {
+                            self.ai_cache.insert_whole(resp.packet_index, text.clone());
+                            if is_current {
+                                self.ai_state = AiState::Ready(text);
+                                self.ai_right_scroll = 0;
+                            }
+                        }
+                        AiRequestKind::Field { layer_index, field_index } => {
+                            self.ai_cache.insert_field(resp.packet_index, *layer_index, *field_index, text.clone());
+                            if is_current {
+                                self.ai_state = AiState::Ready(text);
+                                self.ai_right_scroll = 0;
+                            }
+                        }
+                    }
+                }
+                Err(msg) => {
+                    if is_current {
+                        self.ai_state = AiState::Error(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_ai_overlay_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => { self.show_ai_overlay = false; }
+            KeyCode::Left => { self.ai_overlay_focus = AiOverlayFocus::Left; }
+            KeyCode::Right => { self.ai_overlay_focus = AiOverlayFocus::Right; }
+            KeyCode::Up => match self.ai_overlay_focus {
+                AiOverlayFocus::Left => { self.handle_detail_tree_action(Action::MoveUp); }
+                AiOverlayFocus::Right => { self.ai_right_scroll = self.ai_right_scroll.saturating_sub(1); }
+            },
+            KeyCode::Down => match self.ai_overlay_focus {
+                AiOverlayFocus::Left => { self.handle_detail_tree_action(Action::MoveDown); }
+                AiOverlayFocus::Right => { self.ai_right_scroll = self.ai_right_scroll.saturating_add(1); }
+            },
+            KeyCode::PageUp => {
+                if matches!(self.ai_overlay_focus, AiOverlayFocus::Right) {
+                    self.ai_right_scroll = self.ai_right_scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if matches!(self.ai_overlay_focus, AiOverlayFocus::Right) {
+                    self.ai_right_scroll = self.ai_right_scroll.saturating_add(10);
+                }
+            }
+            KeyCode::Enter => {
+                if matches!(self.ai_overlay_focus, AiOverlayFocus::Left) {
+                    self.handle_detail_tree_action(Action::ToggleExpand);
+                }
+            }
+            KeyCode::Char(' ') => { self.fire_ai_request(); }
+            _ => {
+                if let Some(action) = self.key_bindings.action_for(&key) {
+                    match action {
+                        Action::NextPacket => {
+                            self.handle_packet_table_action(Action::MoveDown);
+                            self.on_ai_packet_changed();
+                        }
+                        Action::PrevPacket => {
+                            self.handle_packet_table_action(Action::MoveUp);
+                            self.on_ai_packet_changed();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_ai_overlay(&mut self) {
+        if !self.config.ai.enabled {
+            self.ai_state = AiState::Unconfigured;
+            self.show_ai_overlay = true;
+            self.ai_overlay_focus = AiOverlayFocus::Left;
+            return;
+        }
+        if self.ai_worker.is_none() {
+            self.ai_worker = Some(AiWorker::spawn(self.config.ai.clone()));
+        }
+        self.show_ai_overlay = true;
+        self.ai_overlay_focus = AiOverlayFocus::Left;
+        self.ai_right_scroll = 0;
+        self.on_ai_packet_changed();
+    }
+
+    fn on_ai_packet_changed(&mut self) {
+        let Some(packet_index) = self.selected_packet else {
+            self.ai_state = AiState::Idle;
+            return;
+        };
+        if let Some(text) = self.ai_cache.get_whole(packet_index) {
+            self.ai_state = AiState::Ready(text);
+            self.ai_right_scroll = 0;
+            return;
+        }
+        self.fire_ai_whole_packet(packet_index);
+    }
+
+    fn fire_ai_request(&mut self) {
+        let Some(packet_index) = self.selected_packet else { return };
+        if !self.config.ai.enabled {
+            self.ai_state = AiState::Unconfigured;
+            return;
+        }
+        if self.ai_worker.is_none() {
+            self.ai_worker = Some(AiWorker::spawn(self.config.ai.clone()));
+        }
+        let kind = match (self.selected_layer, self.selected_field) {
+            (Some(layer), field) => AiRequestKind::Field { layer_index: layer, field_index: field },
+            _ => AiRequestKind::WholePacket,
+        };
+        match &kind {
+            AiRequestKind::WholePacket => {
+                if let Some(text) = self.ai_cache.get_whole(packet_index) {
+                    self.ai_state = AiState::Ready(text);
+                    self.ai_right_scroll = 0;
+                    return;
+                }
+            }
+            AiRequestKind::Field { layer_index, field_index } => {
+                if let Some(text) = self.ai_cache.get_field(packet_index, *layer_index, *field_index) {
+                    self.ai_state = AiState::Ready(text);
+                    self.ai_right_scroll = 0;
+                    return;
+                }
+            }
+        }
+        let context_json = self.build_ai_context(packet_index);
+        let messages = match &kind {
+            AiRequestKind::WholePacket => build_whole_packet_messages(&context_json),
+            AiRequestKind::Field { layer_index, field_index } => {
+                let field_ctx = self.detail.as_ref()
+                    .map(|d| build_field_context(d, *layer_index, *field_index));
+                let field_json = field_ctx.map(|v| v.to_string()).unwrap_or_else(|| "{}".into());
+                build_field_messages(&field_json, &context_json)
+            }
+        };
+        self.ai_seq += 1;
+        let seq = self.ai_seq;
+        if let Some(ref worker) = self.ai_worker {
+            worker.request(AiRequest { packet_index, seq, kind, messages });
+        }
+        self.ai_state = AiState::Loading { seq };
+        self.ai_right_scroll = 0;
+    }
+
+    fn fire_ai_whole_packet(&mut self, packet_index: usize) {
+        if self.ai_worker.is_none() { return; }
+        let context_json = self.build_ai_context(packet_index);
+        let messages = build_whole_packet_messages(&context_json);
+        self.ai_seq += 1;
+        let seq = self.ai_seq;
+        if let Some(ref worker) = self.ai_worker {
+            worker.request(AiRequest {
+                packet_index, seq,
+                kind: AiRequestKind::WholePacket,
+                messages,
+            });
+        }
+        self.ai_state = AiState::Loading { seq };
+        self.ai_right_scroll = 0;
+    }
+
+    fn build_ai_context(&self, packet_index: usize) -> String {
+        let summary = self.store.get(packet_index);
+        let raw = self.store.get_raw(packet_index);
+        let trace_info = self.trace_store.get(packet_index);
+        let container_info = self.container_store.get(packet_index);
+        let link_type_name = format!("{:?}", self.store.link_type());
+        if let Some(summary) = summary {
+            build_packet_context(
+                summary, raw, self.detail.as_ref(),
+                self.config.ai.max_raw_bytes,
+                trace_info, container_info, &link_type_name,
+            ).to_string()
+        } else {
+            "{}".into()
         }
     }
 }

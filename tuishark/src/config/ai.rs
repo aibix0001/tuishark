@@ -100,6 +100,32 @@ cache_size = 16
     }
 
     #[test]
+    fn ai_after_filter_array() {
+        use crate::config::Config;
+        let toml = r#"
+[theme]
+flavor = "latte"
+
+[[filter]]
+name = "TCP only"
+expression = "proto == tcp"
+
+[[filter]]
+name = "DNS"
+expression = "proto == dns"
+
+[ai]
+enabled = true
+base_url = "http://localhost:8100/v1"
+model = "test-model"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ai.enabled, "ai.enabled should be true after [[filter]] array");
+        assert_eq!(config.ai.model, "test-model");
+        assert_eq!(config.filters.len(), 2);
+    }
+
+    #[test]
     fn config_without_ai_section_uses_defaults() {
         use crate::config::Config;
         let config: Config = toml::from_str("").unwrap();

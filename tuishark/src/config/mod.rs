@@ -122,13 +122,33 @@ pub enum ExportFormatDefault {
 }
 
 impl Config {
+    /// Resolve the config file path, falling back to the original user's
+    /// config directory when running under sudo.
+    fn config_path() -> Option<std::path::PathBuf> {
+        let primary = dirs::config_dir().map(|d| d.join("tuishark").join("config.toml"));
+        if let Some(ref p) = primary {
+            if p.exists() {
+                return primary;
+            }
+        }
+        // Under sudo, HOME points to /root — try the invoking user's config
+        if let Ok(user) = std::env::var("SUDO_USER") {
+            let fallback = std::path::PathBuf::from(format!(
+                "/home/{user}/.config/tuishark/config.toml"
+            ));
+            if fallback.exists() {
+                return Some(fallback);
+            }
+        }
+        primary
+    }
+
     /// Load configuration from the default path (`~/.config/tuishark/config.toml`).
     /// Returns default config if the file doesn't exist or can't be parsed.
     pub fn load() -> Self {
-        let Some(config_dir) = dirs::config_dir() else {
+        let Some(path) = Self::config_path() else {
             return Self::default();
         };
-        let path = config_dir.join("tuishark").join("config.toml");
         if !path.exists() {
             return Self::default();
         }

@@ -13,7 +13,9 @@ Prefer protocol facts over speculation.\n\
 If information is missing or ambiguous, say what cannot be determined.\n\
 Do not invent payload contents that are not present in the supplied fields or bytes.\n\
 Connect general networking knowledge to the concrete selected packet.\n\
-Structure the answer for a terminal UI.";
+Structure the answer for a terminal UI.\n\
+Do not use markdown formatting — no asterisks, no headers, no backticks.\n\
+Use plain text with line breaks and indentation for structure.";
 
 const WHOLE_PACKET_PROMPT: &str = "\
 Explain this packet at a high level for someone learning networking.\n\

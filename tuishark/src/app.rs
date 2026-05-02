@@ -1092,6 +1092,19 @@ impl App {
             self.show_trace_overlay = false;
             return;
         }
+        if self.show_trace_overlay {
+            match key.code {
+                KeyCode::Down => {
+                    self.handle_packet_table_action(Action::MoveDown);
+                    return;
+                }
+                KeyCode::Up => {
+                    self.handle_packet_table_action(Action::MoveUp);
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         // Global shortcuts via configurable key bindings
         if let Some(action) = self.key_bindings.action_for(&key) {
@@ -2987,6 +3000,28 @@ fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dissect::model::Protocol;
+
+    fn add_test_packets(app: &mut App, count: usize) {
+        for index in 0..count {
+            app.store.add(
+                PacketSummary {
+                    index,
+                    timestamp: index as f64,
+                    source: "10.0.0.1".into(),
+                    destination: "10.0.0.2".into(),
+                    protocol: Protocol::Tcp,
+                    length: 64,
+                    original_length: 64,
+                    info: format!("packet {index}"),
+                    src_port: Some(12345),
+                    dst_port: Some(80),
+                    link_meta: None,
+                },
+                vec![0; 64],
+            );
+        }
+    }
 
     #[test]
     fn pane_next_cycles() {
@@ -3031,6 +3066,32 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.trace_scroll_offset, 0);
+    }
+
+    #[test]
+    fn trace_overlay_arrow_keys_walk_packets() {
+        let mut app = App::new(None, None, false, false, false, Config::default());
+        add_test_packets(&mut app, 3);
+        app.select_packet(0);
+        app.show_trace_overlay = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_packet, Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.selected_packet, Some(0));
+    }
+
+    #[test]
+    fn trace_overlay_jk_still_scroll_trace() {
+        let mut app = App::new(None, None, false, false, false, Config::default());
+        add_test_packets(&mut app, 2);
+        app.select_packet(0);
+        app.show_trace_overlay = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.selected_packet, Some(0));
+        assert_eq!(app.trace_scroll_offset, 1);
     }
 
     #[test]

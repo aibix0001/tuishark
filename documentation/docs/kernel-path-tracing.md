@@ -85,7 +85,7 @@ The Kernel Trace overlay shows both process info (top) and path timeline (bottom
 +---------------------------------------------------------+
 ```
 
-Press `4` to show or hide the overlay. When it is visible, scroll it with `j`/`k`, arrow keys, `PageUp`/`PageDown`, `Home`, and `End`.
+Press `4` to show or hide the overlay. When it is visible, `Up`/`Down` walks the packet list so the trace content follows the selected packet. Use `j`/`k`, `PageUp`/`PageDown`, `Home`, and `End` to scroll the overlay content.
 
 ## Implementation Details
 

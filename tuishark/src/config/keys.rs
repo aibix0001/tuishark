@@ -39,6 +39,7 @@ pub enum Action {
     ZoomPane,
     IpInfo,
     ContainerInfo,
+    AiPacketInfo,
 }
 
 /// Keyboard configuration section.
@@ -86,6 +87,7 @@ pub struct KeyConfig {
     pub prev_packet: String,
     pub ip_info: String,
     pub container_info: String,
+    pub ai_packet_info: String,
 }
 
 impl Default for KeyConfig {
@@ -123,6 +125,7 @@ impl Default for KeyConfig {
             prev_packet: "ö".into(),
             ip_info: "i".into(),
             container_info: "c".into(),
+            ai_packet_info: "Shift+I".into(),
         }
     }
 }
@@ -171,6 +174,7 @@ impl KeyBindings {
             (Action::PrevPacket, &config.prev_packet, &defaults.prev_packet),
             (Action::IpInfo, &config.ip_info, &defaults.ip_info),
             (Action::ContainerInfo, &config.container_info, &defaults.container_info),
+            (Action::AiPacketInfo, &config.ai_packet_info, &defaults.ai_packet_info),
         ];
 
         for &(action, user_str, default_str) in entries {
@@ -368,5 +372,13 @@ mod tests {
         let prev = KeyEvent::new(KeyCode::Char('ö'), KeyModifiers::NONE);
         assert_eq!(bindings.action_for(&next), Some(Action::NextPacket));
         assert_eq!(bindings.action_for(&prev), Some(Action::PrevPacket));
+    }
+
+    #[test]
+    fn shift_i_maps_to_ai_packet_info() {
+        let config = KeyConfig::default();
+        let bindings = KeyBindings::from_config(&config);
+        let key = KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT);
+        assert_eq!(bindings.action_for(&key), Some(Action::AiPacketInfo));
     }
 }

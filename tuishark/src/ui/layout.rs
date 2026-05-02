@@ -65,8 +65,8 @@ impl AppLayout {
         let lower_cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(70),
-                Constraint::Percentage(30),
+                Constraint::Percentage(60),
+                Constraint::Percentage(40),
             ])
             .split(main_rows[1]);
 
@@ -149,12 +149,12 @@ mod tests {
     }
 
     #[test]
-    fn lower_row_uses_seventy_thirty_split() {
+    fn lower_row_uses_sixty_forty_split() {
         let layout = AppLayout::new(AREA, None);
         let total = layout.detail_tree.width + layout.hex_view.width;
         assert_eq!(total, AREA.width);
-        assert!((layout.detail_tree.width as i16 - 84).abs() <= 1);
-        assert!((layout.hex_view.width as i16 - 36).abs() <= 1);
+        assert!((layout.detail_tree.width as i16 - 72).abs() <= 1);
+        assert!((layout.hex_view.width as i16 - 48).abs() <= 1);
     }
 
     #[test]

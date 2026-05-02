@@ -11,6 +11,14 @@ related_mrs: []
 
 Optional AI-assisted packet explanation overlay. Press `Shift+I` on a selected packet to open a two-column modal showing the packet detail tree on the left and an AI-generated explanation on the right. Uses any OpenAI-compatible `/chat/completions` endpoint.
 
+## Important Notice
+
+AI-generated explanations are produced by the language model and inference endpoint configured by the user. TuiShark does not ship, host, or endorse any AI model or inference service.
+
+**AI models can hallucinate.** Explanations may contain inaccuracies, fabricated protocol details, or incorrect interpretations. The quality and accuracy of explanations depend entirely on the capabilities of the model you configure. Always verify AI-generated analysis against authoritative protocol documentation when accuracy matters.
+
+Packet metadata (headers, fields, bounded raw bytes) is sent to the configured endpoint. No data is sent to any third-party service unless you explicitly configure an external endpoint.
+
 ## Usage
 
 ### Opening the overlay

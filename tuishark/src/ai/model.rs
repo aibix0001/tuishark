@@ -38,6 +38,8 @@ pub struct ChatMessage {
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -239,6 +241,7 @@ mod tests {
                 ChatMessage { role: "system".into(), content: "You are helpful.".into() },
                 ChatMessage { role: "user".into(), content: "Explain this.".into() },
             ],
+            max_tokens: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "test-model");

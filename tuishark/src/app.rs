@@ -3035,27 +3035,26 @@ impl App {
         let Some(ref worker) = self.ai_worker else { return };
         while let Some(resp) = worker.try_recv() {
             let is_current = self.selected_packet == Some(resp.packet_index);
+            let is_latest = resp.seq >= self.ai_seq;
             match resp.result {
                 Ok(text) => {
+                    // Always update cache regardless of staleness
                     match &resp.kind {
                         AiRequestKind::WholePacket => {
                             self.ai_cache.insert_whole(resp.packet_index, text.clone());
-                            if is_current {
-                                self.ai_state = AiState::Ready(text);
-                                self.ai_right_scroll = 0;
-                            }
                         }
                         AiRequestKind::Field { layer_index, field_index } => {
                             self.ai_cache.insert_field(resp.packet_index, *layer_index, *field_index, text.clone());
-                            if is_current {
-                                self.ai_state = AiState::Ready(text);
-                                self.ai_right_scroll = 0;
-                            }
                         }
+                    }
+                    // Only update display state if current packet AND latest request
+                    if is_current && is_latest {
+                        self.ai_state = AiState::Ready(text);
+                        self.ai_right_scroll = 0;
                     }
                 }
                 Err(msg) => {
-                    if is_current {
+                    if is_current && is_latest {
                         self.ai_state = AiState::Error(msg);
                     }
                 }

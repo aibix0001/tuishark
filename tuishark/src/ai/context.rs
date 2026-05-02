@@ -72,6 +72,7 @@ pub fn build_packet_context(
                     "direction": pf.direction.to_string(),
                     "interface": pf.ifname,
                     "rule_number": pf.rule_number,
+                    "reason": crate::dissect::model::pflog_reason_str(pf.reason),
                 });
             }
             LinkMeta::Enc(enc) => {

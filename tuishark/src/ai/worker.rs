@@ -61,7 +61,7 @@ fn worker_loop(
     latest_seq: Arc<AtomicUsize>,
 ) {
     let agent = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_millis(config.timeout_ms))
+        .timeout_read(Duration::from_millis(config.timeout_ms.max(1000)))
         .timeout_write(Duration::from_secs(10))
         .build();
 
@@ -99,6 +99,7 @@ fn execute_request(
     let body = ChatCompletionRequest {
         model: config.model.clone(),
         messages: req.messages.clone(),
+        max_tokens: Some(2048),
     };
 
     let mut http_req = agent.post(url);

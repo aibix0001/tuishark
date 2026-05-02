@@ -171,7 +171,7 @@ The application follows a 3-pane layout with a floating trace overlay:
 └─────────────────────────────────────────┘
 ```
 
-Press `4` to show or hide the Kernel Trace overlay. The overlay is centered over the normal layout and uses about 80% of the terminal width and height.
+Press `4` to show or hide the Kernel Trace overlay. The overlay is centered over the normal layout and uses about 80% of the terminal width and height. While it is open, `Up`/`Down` walks the packet list and `j`/`k` scrolls the trace content.
 
 ### Two-tier packet dissection
 

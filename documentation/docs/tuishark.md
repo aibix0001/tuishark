@@ -165,7 +165,7 @@ The application follows a 3-pane layout with a floating trace overlay:
 ├─────────────────────────────────────────┤
 │ Packet Table (virtual scrolling)        │
 ├─────────────────────────────────────────┤
-│ Detail Tree (70%)     │ Hex Dump (30%)  │
+│ Detail Tree (60%)     │ Hex Dump (40%)  │
 ├───────────────────┴─────────────────────┤
 │ Status Bar (packet count, selection)    │
 └─────────────────────────────────────────┘

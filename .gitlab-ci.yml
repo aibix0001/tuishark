@@ -2,6 +2,7 @@ stages:
   - check
   - build
   - manifest
+  - release
 
 variables:
   IMAGE: ${CI_REGISTRY_IMAGE}
@@ -19,25 +20,29 @@ variables:
         - tuishark/**/*
         - tuishark-ebpf/**/*
 
-# --- Stage 0: FreeBSD cross-compilation check ---
+# --- Stage 0: FreeBSD cross-compilation build ---
 
-check-freebsd:
-  stage: check
+build-freebsd:
+  stage: build
   tags:
     - x86_64
   image: rust:1.94-bookworm
   variables:
     CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   cache:
-    key: freebsd-check
+    key: freebsd-build
     paths:
       - .cargo/registry/
       - target/
   script:
-    - rustup target add x86_64-unknown-freebsd
-    # Type-checking gate only (no linker needed); full cross-build CI in Phase 12.
-    # trace feature is not in default features, so eBPF code is excluded.
-    - cargo check --target x86_64-unknown-freebsd -p tuishark
+    - cargo install cross --locked || true
+    - cross build --target x86_64-unknown-freebsd -p tuishark --release
+    - cp target/x86_64-unknown-freebsd/release/tuishark tuishark-freebsd-amd64
+    - llvm-strip tuishark-freebsd-amd64 2>/dev/null || strip tuishark-freebsd-amd64 2>/dev/null || true
+  artifacts:
+    paths:
+      - tuishark-freebsd-amd64
+    expire_in: 30 days
   extends: .build-rules
 
 # --- Stage 1: native builds in parallel ---
@@ -109,3 +114,26 @@ create-manifest:
         docker manifest push "${IMAGE}:${CI_COMMIT_TAG}"
       fi
   extends: .build-rules
+
+# --- Stage 3: publish FreeBSD binary as GitLab release asset on tags ---
+
+release-freebsd:
+  stage: release
+  tags:
+    - x86_64
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build-freebsd
+      artifacts: true
+  script:
+    - echo "Publishing FreeBSD binary for ${CI_COMMIT_TAG}"
+  release:
+    tag_name: ${CI_COMMIT_TAG}
+    description: "Release ${CI_COMMIT_TAG}"
+    assets:
+      links:
+        - name: tuishark-freebsd-amd64
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/tuishark-freebsd-amd64?job=build-freebsd"
+          link_type: package
+  rules:
+    - if: $CI_COMMIT_TAG

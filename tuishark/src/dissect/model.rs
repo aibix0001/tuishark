@@ -221,6 +221,14 @@ pub struct PacketSummary {
     pub dst_port: Option<u16>,
     /// Link-layer metadata (pflog/enc only).
     pub link_meta: Option<LinkMeta>,
+    /// Source MAC address (Ethernet only).
+    pub eth_src: Option<String>,
+    /// Destination MAC address (Ethernet only).
+    pub eth_dst: Option<String>,
+    /// VLAN ID (802.1Q tag, if present).
+    pub vlan_id: Option<u16>,
+    /// TCP flags bitmask (FIN=0x01, SYN=0x02, RST=0x04, PSH=0x08, ACK=0x10, URG=0x20).
+    pub tcp_flags: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +241,20 @@ pub enum Protocol {
     Dns,
     Http,
     Tls,
+    Ssh,
+    Smtp,
+    Ftp,
+    Telnet,
+    Rdp,
+    Bgp,
+    Ldap,
+    Dhcp,
+    Ntp,
+    Snmp,
+    Syslog,
+    Tftp,
+    Mdns,
+    Radius,
     Ipv4,
     Ipv6,
     Ethernet,
@@ -254,6 +276,20 @@ impl Protocol {
             Protocol::Dns => s_lower == "dns",
             Protocol::Http => s_lower == "http",
             Protocol::Tls => s_lower == "tls" || s_lower == "https",
+            Protocol::Ssh => s_lower == "ssh",
+            Protocol::Smtp => s_lower == "smtp",
+            Protocol::Ftp => s_lower == "ftp",
+            Protocol::Telnet => s_lower == "telnet",
+            Protocol::Rdp => s_lower == "rdp",
+            Protocol::Bgp => s_lower == "bgp",
+            Protocol::Ldap => s_lower == "ldap",
+            Protocol::Dhcp => s_lower == "dhcp",
+            Protocol::Ntp => s_lower == "ntp",
+            Protocol::Snmp => s_lower == "snmp",
+            Protocol::Syslog => s_lower == "syslog",
+            Protocol::Tftp => s_lower == "tftp",
+            Protocol::Mdns => s_lower == "mdns",
+            Protocol::Radius => s_lower == "radius",
             Protocol::Ipv4 => s_lower == "ipv4" || s_lower == "ip",
             Protocol::Ipv6 => s_lower == "ipv6",
             Protocol::Ethernet => s_lower == "ethernet" || s_lower == "eth",
@@ -261,6 +297,18 @@ impl Protocol {
             Protocol::Enc => s_lower == "enc" || s_lower == "ipsec",
             Protocol::Unknown(name) => name.to_ascii_lowercase() == s_lower,
         }
+    }
+
+    pub fn is_known_name(s: &str) -> bool {
+        matches!(
+            s.to_ascii_lowercase().as_str(),
+            "tcp" | "udp" | "icmp" | "icmpv6" | "arp" | "dns" | "http"
+                | "tls" | "https" | "ssh" | "smtp" | "ftp" | "telnet"
+                | "rdp" | "bgp" | "ldap" | "dhcp" | "ntp" | "snmp"
+                | "syslog" | "tftp" | "mdns" | "radius"
+                | "ipv4" | "ip" | "ipv6" | "ethernet" | "eth"
+                | "pflog" | "pf" | "enc" | "ipsec"
+        )
     }
 
     /// Case-insensitive substring check without heap allocation.
@@ -275,13 +323,26 @@ impl Protocol {
             Protocol::Dns => "dns",
             Protocol::Http => "http",
             Protocol::Tls => "tls",
+            Protocol::Ssh => "ssh",
+            Protocol::Smtp => "smtp",
+            Protocol::Ftp => "ftp",
+            Protocol::Telnet => "telnet",
+            Protocol::Rdp => "rdp",
+            Protocol::Bgp => "bgp",
+            Protocol::Ldap => "ldap",
+            Protocol::Dhcp => "dhcp",
+            Protocol::Ntp => "ntp",
+            Protocol::Snmp => "snmp",
+            Protocol::Syslog => "syslog",
+            Protocol::Tftp => "tftp",
+            Protocol::Mdns => "mdns",
+            Protocol::Radius => "radius",
             Protocol::Ipv4 => "ipv4",
             Protocol::Ipv6 => "ipv6",
             Protocol::Ethernet => "ethernet",
             Protocol::Pflog => "pflog",
             Protocol::Enc => "enc",
             Protocol::Unknown(s) => {
-                // Unknown names may have mixed case
                 return s.to_ascii_lowercase().contains(needle);
             }
         };
@@ -300,6 +361,20 @@ impl fmt::Display for Protocol {
             Protocol::Dns => write!(f, "DNS"),
             Protocol::Http => write!(f, "HTTP"),
             Protocol::Tls => write!(f, "TLS"),
+            Protocol::Ssh => write!(f, "SSH"),
+            Protocol::Smtp => write!(f, "SMTP"),
+            Protocol::Ftp => write!(f, "FTP"),
+            Protocol::Telnet => write!(f, "Telnet"),
+            Protocol::Rdp => write!(f, "RDP"),
+            Protocol::Bgp => write!(f, "BGP"),
+            Protocol::Ldap => write!(f, "LDAP"),
+            Protocol::Dhcp => write!(f, "DHCP"),
+            Protocol::Ntp => write!(f, "NTP"),
+            Protocol::Snmp => write!(f, "SNMP"),
+            Protocol::Syslog => write!(f, "Syslog"),
+            Protocol::Tftp => write!(f, "TFTP"),
+            Protocol::Mdns => write!(f, "mDNS"),
+            Protocol::Radius => write!(f, "RADIUS"),
             Protocol::Ipv4 => write!(f, "IPv4"),
             Protocol::Ipv6 => write!(f, "IPv6"),
             Protocol::Ethernet => write!(f, "Ethernet"),

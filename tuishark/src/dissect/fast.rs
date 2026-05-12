@@ -1,4 +1,4 @@
-use etherparse::{LinkSlice, NetSlice, SlicedPacket, TransportSlice};
+use etherparse::{LinkSlice, NetSlice, SlicedPacket, TransportSlice, VlanSlice};
 
 use super::model::{
     pflog_reason_str, EncMeta, Layer, LayerField, LinkMeta, LinkType, PacketDetail, PacketSummary,
@@ -24,6 +24,10 @@ pub fn parse_packet_with_wire_len(
     let mut src_port: Option<u16> = None;
     let mut dst_port: Option<u16> = None;
     let mut link_meta: Option<LinkMeta> = None;
+    let mut eth_src: Option<String> = None;
+    let mut eth_dst: Option<String> = None;
+    let mut vlan_id: Option<u16> = None;
+    let mut tcp_flags: u8 = 0;
 
     // For pflog/enc, parse the link header first; on failure, return early with Unknown protocol.
     let parsed_result = match link_type {
@@ -64,9 +68,22 @@ pub fn parse_packet_with_wire_len(
         if let Some(LinkSlice::Ethernet2(ref eth)) = parsed.link {
             source = format_mac(eth.source());
             destination = format_mac(eth.destination());
+            eth_src = Some(source.clone());
+            eth_dst = Some(destination.clone());
             if matches!(protocol, Protocol::Unknown(_)) {
                 protocol = Protocol::Ethernet;
             }
+        }
+
+        // VLAN (802.1Q)
+        match &parsed.vlan {
+            Some(VlanSlice::SingleVlan(v)) => {
+                vlan_id = Some(v.vlan_identifier().into());
+            }
+            Some(VlanSlice::DoubleVlan(v)) => {
+                vlan_id = Some(v.outer().vlan_identifier().into());
+            }
+            None => {}
         }
 
         // Network layer
@@ -95,6 +112,7 @@ pub fn parse_packet_with_wire_len(
                 let dp = tcp.destination_port();
                 src_port = Some(sp);
                 dst_port = Some(dp);
+                tcp_flags = extract_tcp_flags(tcp);
                 if !matches!(protocol, Protocol::Pflog | Protocol::Enc) {
                     protocol = classify_tcp_port(sp, dp);
                 }
@@ -163,6 +181,10 @@ pub fn parse_packet_with_wire_len(
         src_port,
         dst_port,
         link_meta,
+        eth_src,
+        eth_dst,
+        vlan_id,
+        tcp_flags,
     }
 }
 
@@ -629,6 +651,14 @@ fn classify_tcp_port(src: u16, dst: u16) -> Protocol {
     match (src, dst) {
         (80, _) | (_, 80) | (8080, _) | (_, 8080) => Protocol::Http,
         (443, _) | (_, 443) => Protocol::Tls,
+        (53, _) | (_, 53) => Protocol::Dns,
+        (22, _) | (_, 22) => Protocol::Ssh,
+        (25, _) | (_, 25) | (465, _) | (_, 465) | (587, _) | (_, 587) => Protocol::Smtp,
+        (20, _) | (_, 20) | (21, _) | (_, 21) => Protocol::Ftp,
+        (23, _) | (_, 23) => Protocol::Telnet,
+        (3389, _) | (_, 3389) => Protocol::Rdp,
+        (179, _) | (_, 179) => Protocol::Bgp,
+        (389, _) | (_, 389) | (636, _) | (_, 636) => Protocol::Ldap,
         _ => Protocol::Tcp,
     }
 }
@@ -636,8 +666,26 @@ fn classify_tcp_port(src: u16, dst: u16) -> Protocol {
 fn classify_udp_port(src: u16, dst: u16) -> Protocol {
     match (src, dst) {
         (53, _) | (_, 53) => Protocol::Dns,
+        (67, _) | (_, 67) | (68, _) | (_, 68) => Protocol::Dhcp,
+        (123, _) | (_, 123) => Protocol::Ntp,
+        (161, _) | (_, 161) | (162, _) | (_, 162) => Protocol::Snmp,
+        (514, _) | (_, 514) => Protocol::Syslog,
+        (69, _) | (_, 69) => Protocol::Tftp,
+        (5353, _) | (_, 5353) => Protocol::Mdns,
+        (1812, _) | (_, 1812) | (1813, _) | (_, 1813) => Protocol::Radius,
         _ => Protocol::Udp,
     }
+}
+
+fn extract_tcp_flags(tcp: &etherparse::TcpSlice) -> u8 {
+    let mut flags: u8 = 0;
+    if tcp.fin() { flags |= 0x01; }
+    if tcp.syn() { flags |= 0x02; }
+    if tcp.rst() { flags |= 0x04; }
+    if tcp.psh() { flags |= 0x08; }
+    if tcp.ack() { flags |= 0x10; }
+    if tcp.urg() { flags |= 0x20; }
+    flags
 }
 
 fn format_tcp_info(tcp: &etherparse::TcpSlice) -> String {
@@ -878,6 +926,59 @@ mod tests {
         assert!(matches!(classify_udp_port(12345, 53), Protocol::Dns));
         assert!(matches!(classify_udp_port(53, 12345), Protocol::Dns));
         assert!(matches!(classify_udp_port(12345, 9999), Protocol::Udp));
+        // DNS over TCP
+        assert!(matches!(classify_tcp_port(12345, 53), Protocol::Dns));
+        assert!(matches!(classify_tcp_port(53, 12345), Protocol::Dns));
+        // Expanded TCP classification
+        assert!(matches!(classify_tcp_port(12345, 22), Protocol::Ssh));
+        assert!(matches!(classify_tcp_port(12345, 25), Protocol::Smtp));
+        assert!(matches!(classify_tcp_port(12345, 465), Protocol::Smtp));
+        assert!(matches!(classify_tcp_port(12345, 587), Protocol::Smtp));
+        assert!(matches!(classify_tcp_port(12345, 21), Protocol::Ftp));
+        assert!(matches!(classify_tcp_port(12345, 23), Protocol::Telnet));
+        assert!(matches!(classify_tcp_port(12345, 3389), Protocol::Rdp));
+        assert!(matches!(classify_tcp_port(12345, 179), Protocol::Bgp));
+        assert!(matches!(classify_tcp_port(12345, 389), Protocol::Ldap));
+        assert!(matches!(classify_tcp_port(12345, 636), Protocol::Ldap));
+        // Expanded UDP classification
+        assert!(matches!(classify_udp_port(12345, 67), Protocol::Dhcp));
+        assert!(matches!(classify_udp_port(12345, 68), Protocol::Dhcp));
+        assert!(matches!(classify_udp_port(12345, 123), Protocol::Ntp));
+        assert!(matches!(classify_udp_port(12345, 161), Protocol::Snmp));
+        assert!(matches!(classify_udp_port(12345, 162), Protocol::Snmp));
+        assert!(matches!(classify_udp_port(12345, 514), Protocol::Syslog));
+        assert!(matches!(classify_udp_port(12345, 69), Protocol::Tftp));
+        assert!(matches!(classify_udp_port(12345, 5353), Protocol::Mdns));
+        assert!(matches!(classify_udp_port(12345, 1812), Protocol::Radius));
+        assert!(matches!(classify_udp_port(12345, 1813), Protocol::Radius));
+    }
+
+    #[test]
+    fn parse_eth_mac_stored() {
+        let data = make_eth_ipv4_tcp([192, 168, 1, 1], [10, 0, 0, 1], 12345, 80, 0x02);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert!(pkt.eth_src.is_some());
+        assert!(pkt.eth_dst.is_some());
+        assert_eq!(pkt.eth_src.unwrap(), "66:77:88:99:aa:bb");
+        assert_eq!(pkt.eth_dst.unwrap(), "00:11:22:33:44:55");
+    }
+
+    #[test]
+    fn tcp_flags_extracted() {
+        let data = make_eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 12345, 80, 0x02);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert_eq!(pkt.tcp_flags, 0x02); // SYN
+        let data = make_eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 12345, 80, 0x12);
+        let pkt = parse_packet(0, 0.0, &data);
+        assert_eq!(pkt.tcp_flags, 0x12); // SYN+ACK
+    }
+
+    #[test]
+    fn raw_ip_no_mac() {
+        let data = make_raw_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 54321, 80, 0x02);
+        let pkt = parse_packet_with_wire_len(0, 0.0, &data, data.len(), LinkType::RawIp);
+        assert!(pkt.eth_src.is_none());
+        assert!(pkt.eth_dst.is_none());
     }
 
     // --- Raw IP tests ---

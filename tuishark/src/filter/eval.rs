@@ -1,5 +1,6 @@
 /// Evaluate a filter expression against a PacketSummary.
 
+use std::net::IpAddr;
 use crate::dissect::model::{self, LinkMeta, PacketSummary};
 use super::ast::{CompareOp, Expr, Field, Value};
 
@@ -8,23 +9,59 @@ pub fn matches(expr: &Expr, pkt: &PacketSummary) -> bool {
     match expr {
         Expr::Compare { field, op, value } => eval_compare(field, op, value, pkt),
         Expr::Contains { field, value } => eval_contains(field, value, pkt),
+        Expr::ProtoMatch(name) => pkt.protocol.matches_str(name),
+        Expr::BareField(field) => eval_bare_field(field, pkt),
         Expr::And(left, right) => matches(left, pkt) && matches(right, pkt),
         Expr::Or(left, right) => matches(left, pkt) || matches(right, pkt),
         Expr::Not(inner) => !matches(inner, pkt),
     }
 }
 
+fn eval_bare_field(field: &Field, pkt: &PacketSummary) -> bool {
+    match field {
+        Field::TcpFlagSyn => pkt.tcp_flags & 0x02 != 0,
+        Field::TcpFlagAck => pkt.tcp_flags & 0x10 != 0,
+        Field::TcpFlagFin => pkt.tcp_flags & 0x01 != 0,
+        Field::TcpFlagRst => pkt.tcp_flags & 0x04 != 0,
+        Field::TcpFlagPsh => pkt.tcp_flags & 0x08 != 0,
+        Field::TcpFlagUrg => pkt.tcp_flags & 0x20 != 0,
+        _ => false,
+    }
+}
+
 fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummary) -> bool {
     match field {
-        Field::IpSrc => cmp_str(&pkt.source, op, value),
-        Field::IpDst => cmp_str(&pkt.destination, op, value),
-        Field::IpAddr => cmp_str(&pkt.source, op, value) || cmp_str(&pkt.destination, op, value),
+        Field::IpSrc => cmp_ip(&pkt.source, op, value),
+        Field::IpDst => cmp_ip(&pkt.destination, op, value),
+        Field::IpAddr => cmp_ip(&pkt.source, op, value) || cmp_ip(&pkt.destination, op, value),
         Field::PortSrc => cmp_port(pkt.src_port, op, value),
         Field::PortDst => cmp_port(pkt.dst_port, op, value),
         Field::Port => cmp_port(pkt.src_port, op, value) || cmp_port(pkt.dst_port, op, value),
         Field::Proto => cmp_proto(pkt, op, value),
         Field::Len => cmp_int(pkt.original_length as u64, op, value),
         Field::Info => cmp_str(&pkt.info, op, value),
+        Field::EthSrc => match &pkt.eth_src {
+            Some(mac) => cmp_str(mac, op, value),
+            None => false,
+        },
+        Field::EthDst => match &pkt.eth_dst {
+            Some(mac) => cmp_str(mac, op, value),
+            None => false,
+        },
+        Field::EthAddr => {
+            pkt.eth_src.as_deref().is_some_and(|m| cmp_str(m, op, value))
+                || pkt.eth_dst.as_deref().is_some_and(|m| cmp_str(m, op, value))
+        },
+        Field::VlanId => match pkt.vlan_id {
+            Some(vid) => cmp_int(vid as u64, op, value),
+            None => false,
+        },
+        Field::TcpFlagSyn => cmp_int(((pkt.tcp_flags >> 1) & 1) as u64, op, value),
+        Field::TcpFlagAck => cmp_int(((pkt.tcp_flags >> 4) & 1) as u64, op, value),
+        Field::TcpFlagFin => cmp_int((pkt.tcp_flags & 1) as u64, op, value),
+        Field::TcpFlagRst => cmp_int(((pkt.tcp_flags >> 2) & 1) as u64, op, value),
+        Field::TcpFlagPsh => cmp_int(((pkt.tcp_flags >> 3) & 1) as u64, op, value),
+        Field::TcpFlagUrg => cmp_int(((pkt.tcp_flags >> 5) & 1) as u64, op, value),
         Field::PfAction => match &pkt.link_meta {
             Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
                 Some(s) => cmp_str(s, op, value),
@@ -57,10 +94,9 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
         },
         Field::EncFlags => match &pkt.link_meta {
             Some(LinkMeta::Enc(m)) => match value {
-                // String value: compare against decoded flag name
                 Value::Str(_) => cmp_str(model::enc_flags_str(m.flags), op, value),
-                // Integer value: compare raw bitmask
                 Value::Int(_) => cmp_int(m.flags as u64, op, value),
+                Value::Cidr { .. } => false,
             },
             _ => false,
         },
@@ -78,6 +114,12 @@ fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
         }
         Field::Info => str_contains_lower(&pkt.info, needle),
         Field::Proto => pkt.protocol.contains_lower(needle),
+        Field::EthSrc => pkt.eth_src.as_deref().is_some_and(|m| str_contains_lower(m, needle)),
+        Field::EthDst => pkt.eth_dst.as_deref().is_some_and(|m| str_contains_lower(m, needle)),
+        Field::EthAddr => {
+            pkt.eth_src.as_deref().is_some_and(|m| str_contains_lower(m, needle))
+                || pkt.eth_dst.as_deref().is_some_and(|m| str_contains_lower(m, needle))
+        },
         Field::PfAction => match &pkt.link_meta {
             Some(LinkMeta::Pflog(m)) => match m.action.as_str() {
                 Some(s) => str_contains_lower(s, needle),
@@ -104,8 +146,11 @@ fn eval_contains(field: &Field, needle: &str, pkt: &PacketSummary) -> bool {
             Some(LinkMeta::Enc(m)) => str_contains_lower(model::enc_flags_str(m.flags), needle),
             _ => false,
         },
-        // contains doesn't make sense for numeric fields, but handle gracefully
+        // contains doesn't make sense for numeric/boolean fields
         Field::PortSrc | Field::PortDst | Field::Port | Field::Len
+        | Field::VlanId
+        | Field::TcpFlagSyn | Field::TcpFlagAck | Field::TcpFlagFin
+        | Field::TcpFlagRst | Field::TcpFlagPsh | Field::TcpFlagUrg
         | Field::PfRule | Field::EncSpi => false,
     }
 }
@@ -131,14 +176,59 @@ fn str_contains_lower(haystack: &str, needle: &str) -> bool {
         })
 }
 
+fn cmp_ip(field_val: &str, op: &CompareOp, value: &Value) -> bool {
+    // CIDR matching
+    if let Value::Cidr { addr, prefix_len } = value {
+        let matches_cidr = match (field_val.parse::<IpAddr>(), addr) {
+            (Ok(IpAddr::V4(ip)), IpAddr::V4(net)) => {
+                let mask = match *prefix_len {
+                    0 => 0u32,
+                    p if p >= 32 => u32::MAX,
+                    p => !0u32 << (32 - p),
+                };
+                (u32::from(ip) & mask) == (u32::from(*net) & mask)
+            }
+            (Ok(IpAddr::V6(ip)), IpAddr::V6(net)) => {
+                let mask = match *prefix_len {
+                    0 => 0u128,
+                    p if p >= 128 => u128::MAX,
+                    p => !0u128 << (128 - p),
+                };
+                (u128::from(ip) & mask) == (u128::from(*net) & mask)
+            }
+            _ => false,
+        };
+        return match op {
+            CompareOp::Eq => matches_cidr,
+            CompareOp::Ne => !matches_cidr,
+            _ => false,
+        };
+    }
+    // Numeric IP comparison for ordering operators
+    if matches!(op, CompareOp::Gt | CompareOp::Lt | CompareOp::Ge | CompareOp::Le) {
+        if let Value::Str(s) = value {
+            if let (Ok(a), Ok(b)) = (field_val.parse::<IpAddr>(), s.parse::<IpAddr>()) {
+                return match op {
+                    CompareOp::Gt => a > b,
+                    CompareOp::Lt => a < b,
+                    CompareOp::Ge => a >= b,
+                    CompareOp::Le => a <= b,
+                    _ => unreachable!(),
+                };
+            }
+        }
+    }
+    cmp_str(field_val, op, value)
+}
+
 fn cmp_str(field_val: &str, op: &CompareOp, value: &Value) -> bool {
     let cmp_val = match value {
         Value::Str(s) => s.as_str(),
         Value::Int(n) => {
-            // Avoid recursion + allocation: compare inline
             let s = n.to_string();
             return cmp_str_inner(field_val, op, &s);
         }
+        Value::Cidr { .. } => return false,
     };
     cmp_str_inner(field_val, op, cmp_val)
 }
@@ -186,6 +276,7 @@ fn cmp_int(field_val: u64, op: &CompareOp, value: &Value) -> bool {
             Ok(n) => n,
             Err(_) => return false,
         },
+        Value::Cidr { .. } => return false,
     };
     match op {
         CompareOp::Eq => field_val == cmp_val,
@@ -200,7 +291,7 @@ fn cmp_int(field_val: u64, op: &CompareOp, value: &Value) -> bool {
 fn cmp_proto(pkt: &PacketSummary, op: &CompareOp, value: &Value) -> bool {
     let proto_name = match value {
         Value::Str(s) => s.as_str(),
-        Value::Int(_) => return false,
+        Value::Int(_) | Value::Cidr { .. } => return false,
     };
     match op {
         CompareOp::Eq => pkt.protocol.matches_str(proto_name),
@@ -229,6 +320,10 @@ mod tests {
             src_port: Some(54321),
             dst_port: Some(443),
             link_meta: None,
+            eth_src: Some("aa:bb:cc:dd:ee:ff".into()),
+            eth_dst: Some("11:22:33:44:55:66".into()),
+            vlan_id: Some(100),
+            tcp_flags: 0x02, // SYN
         }
     }
 
@@ -334,6 +429,10 @@ mod tests {
             src_port: None,
             dst_port: None,
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         let expr = parser::parse("port == 80").unwrap();
         assert!(!super::matches(&expr, &pkt));
@@ -387,6 +486,10 @@ mod tests {
                 reason: 0,
                 header_len: 100,
             })),
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         }
     }
 
@@ -407,6 +510,10 @@ mod tests {
                 spi: 0x12345678,
                 flags: 3,
             })),
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         }
     }
 
@@ -507,13 +614,235 @@ mod tests {
 
     #[test]
     fn len_uses_original_length() {
-        // Verify len checks original_length (wire length), not captured length
         let mut pkt = sample_pkt();
-        pkt.length = 96; // truncated capture
-        pkt.original_length = 1500; // wire length
+        pkt.length = 96;
+        pkt.original_length = 1500;
         let expr = parser::parse("len == 1500").unwrap();
         assert!(super::matches(&expr, &pkt));
         let expr = parser::parse("len == 96").unwrap();
         assert!(!super::matches(&expr, &pkt));
+    }
+
+    // --- CIDR subnet matching ---
+
+    #[test]
+    fn cidr_ipv4_match() {
+        assert!(eval("ip.src == 192.168.1.0/24"));
+        assert!(eval("ip.addr == 192.168.1.0/24"));
+        assert!(!eval("ip.src == 10.1.0.0/16"));
+    }
+
+    #[test]
+    fn cidr_ipv4_ne() {
+        assert!(!eval("ip.src != 192.168.1.0/24"));
+        assert!(eval("ip.src != 10.1.0.0/16"));
+    }
+
+    #[test]
+    fn cidr_dst() {
+        assert!(eval("ip.dst == 10.0.0.0/8"));
+        assert!(!eval("ip.dst == 172.16.0.0/12"));
+    }
+
+    #[test]
+    fn cidr_slash_zero_matches_all() {
+        assert!(eval("ip.src == 0.0.0.0/0"));
+        assert!(eval("ip.dst == 0.0.0.0/0"));
+    }
+
+    #[test]
+    fn cidr_slash_32_exact() {
+        assert!(eval("ip.src == 192.168.1.10/32"));
+        assert!(!eval("ip.src == 192.168.1.11/32"));
+    }
+
+    // --- Bare protocol name ---
+
+    #[test]
+    fn bare_proto_tcp() {
+        assert!(eval("tcp"));
+        assert!(!eval("udp"));
+        assert!(!eval("arp"));
+    }
+
+    #[test]
+    fn bare_proto_combined() {
+        assert!(eval("tcp and port == 443"));
+        assert!(!eval("udp or arp"));
+    }
+
+    #[test]
+    fn bare_proto_not() {
+        assert!(eval("not udp"));
+        assert!(!eval("not tcp"));
+    }
+
+    #[test]
+    fn bare_proto_alias() {
+        let mut pkt = sample_pkt();
+        pkt.protocol = Protocol::Tls;
+        let expr = parser::parse("https").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("tls").unwrap();
+        assert!(super::matches(&expr, &pkt));
+    }
+
+    // --- Wireshark field aliases ---
+
+    #[test]
+    fn tcp_srcport_alias() {
+        assert!(eval("tcp.srcport == 54321"));
+        assert!(!eval("tcp.srcport == 443"));
+    }
+
+    #[test]
+    fn tcp_dstport_alias() {
+        assert!(eval("tcp.dstport == 443"));
+    }
+
+    #[test]
+    fn udp_srcport_alias() {
+        assert!(eval("udp.srcport == 54321"));
+    }
+
+    #[test]
+    fn frame_len_alias() {
+        assert!(eval("frame.len == 1500"));
+    }
+
+    // --- Expanded protocol classification ---
+
+    #[test]
+    fn classify_ssh() {
+        let mut pkt = sample_pkt();
+        pkt.protocol = Protocol::Ssh;
+        let expr = parser::parse("ssh").unwrap();
+        assert!(super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn classify_dhcp() {
+        let mut pkt = sample_pkt();
+        pkt.protocol = Protocol::Dhcp;
+        let expr = parser::parse("dhcp").unwrap();
+        assert!(super::matches(&expr, &pkt));
+    }
+
+    // --- MAC address filter fields ---
+
+    #[test]
+    fn eth_src_filter() {
+        assert!(eval("eth.src == aa:bb:cc:dd:ee:ff"));
+        assert!(!eval("eth.src == 11:22:33:44:55:66"));
+    }
+
+    #[test]
+    fn eth_dst_filter() {
+        assert!(eval("eth.dst == 11:22:33:44:55:66"));
+        assert!(!eval("eth.dst == aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn eth_addr_filter() {
+        assert!(eval("eth.addr == aa:bb:cc:dd:ee:ff"));
+        assert!(eval("eth.addr == 11:22:33:44:55:66"));
+        assert!(!eval("eth.addr == 00:00:00:00:00:00"));
+    }
+
+    #[test]
+    fn eth_contains() {
+        assert!(eval("eth.src contains \"aa:bb\""));
+        assert!(eval("eth.addr contains \"33:44\""));
+    }
+
+    #[test]
+    fn eth_no_mac() {
+        let mut pkt = sample_pkt();
+        pkt.eth_src = None;
+        pkt.eth_dst = None;
+        let expr = parser::parse("eth.src == aa:bb:cc:dd:ee:ff").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    // --- VLAN ---
+
+    #[test]
+    fn vlan_id_filter() {
+        assert!(eval("vlan.id == 100"));
+        assert!(!eval("vlan.id == 200"));
+        assert!(eval("vlan.id > 50"));
+    }
+
+    #[test]
+    fn vlan_no_tag() {
+        let mut pkt = sample_pkt();
+        pkt.vlan_id = None;
+        let expr = parser::parse("vlan.id == 100").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    // --- TCP flags ---
+
+    #[test]
+    fn tcp_flags_bare() {
+        assert!(eval("tcp.flags.syn"));
+        assert!(!eval("tcp.flags.ack"));
+        assert!(!eval("tcp.flags.fin"));
+        assert!(!eval("tcp.flags.rst"));
+    }
+
+    #[test]
+    fn tcp_flags_compare() {
+        assert!(eval("tcp.flags.syn == 1"));
+        assert!(eval("tcp.flags.ack == 0"));
+    }
+
+    #[test]
+    fn tcp_flags_combined() {
+        let mut pkt = sample_pkt();
+        pkt.tcp_flags = 0x12; // SYN+ACK
+        let expr = parser::parse("tcp.flags.syn and tcp.flags.ack").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("tcp.flags.fin").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn tcp_flags_not() {
+        assert!(eval("not tcp.flags.rst"));
+        assert!(!eval("not tcp.flags.syn"));
+    }
+
+    // --- IPv6 address tokenization ---
+
+    #[test]
+    fn ipv6_filter() {
+        let mut pkt = sample_pkt();
+        pkt.source = "2001:db8::1".into();
+        pkt.destination = "fe80::1".into();
+        let expr = parser::parse("ip.src == 2001:db8::1").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("ip.dst == fe80::1").unwrap();
+        assert!(super::matches(&expr, &pkt));
+    }
+
+    #[test]
+    fn ipv6_cidr() {
+        let mut pkt = sample_pkt();
+        pkt.source = "2001:db8::1".into();
+        let expr = parser::parse("ip.src == 2001:db8::/32").unwrap();
+        assert!(super::matches(&expr, &pkt));
+        let expr = parser::parse("ip.src == fe80::/10").unwrap();
+        assert!(!super::matches(&expr, &pkt));
+    }
+
+    // --- Numeric IP comparison ---
+
+    #[test]
+    fn ip_numeric_ordering() {
+        assert!(eval("ip.src > 192.168.1.1"));
+        assert!(eval("ip.src < 192.168.2.0"));
+        assert!(eval("ip.dst >= 10.0.0.1"));
+        assert!(eval("ip.dst <= 10.0.0.1"));
     }
 }

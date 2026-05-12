@@ -127,6 +127,10 @@ mod tests {
                 src_port: Some(54321),
                 dst_port: Some(443),
                 link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
             };
             store.add(pkt, vec![0u8; 1500]);
         }
@@ -186,6 +190,10 @@ mod tests {
             src_port: Some(443),
             dst_port: Some(80),
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         store.add(pkt, vec![0u8; 64]);
         let mut buf = Vec::new();
@@ -217,6 +225,10 @@ mod tests {
                 reason: 0,
                 header_len: 100,
             })),
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         store.add(pkt, vec![0u8; 100]);
         let mut buf = Vec::new();
@@ -244,6 +256,10 @@ mod tests {
                 spi: 0x12345678,
                 flags: 3,
             })),
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         store.add(pkt, vec![0u8; 200]);
         let mut buf = Vec::new();

@@ -161,13 +161,14 @@ enum DissectOutcome {
 }
 
 fn dissect_with_timeout(
-    mut dissector: DeepDissector,
+    dissector: DeepDissector,
     req: DissectRequest,
     timeout: Duration,
 ) -> DissectOutcome {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        let mut dissector = dissector;
         let (detail, error) = match dissector.dissect_packet(&req.raw, req.timestamp) {
             Ok(d) => (Some(d), None),
             Err(e) => (None, Some(format!("{e:#}"))),

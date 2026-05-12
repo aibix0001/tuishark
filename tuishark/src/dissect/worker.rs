@@ -2,9 +2,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use super::deep::DeepDissector;
 use super::model::PacketDetail;
+
+const DISSECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Request to deeply dissect a packet.
 pub struct DissectRequest {
@@ -53,7 +56,7 @@ impl DissectWorker {
         let seq_clone = latest_seq.clone();
         let alive_clone = alive.clone();
         thread::spawn(move || {
-            worker_loop(dissector, request_rx, result_tx, seq_clone);
+            worker_loop(dissector, request_rx, result_tx, seq_clone, linktype);
             alive_clone.store(false, Ordering::Release);
         });
 
@@ -70,7 +73,6 @@ impl DissectWorker {
     /// Updates the latest sequence number so the worker can skip stale requests.
     pub fn request(&self, req: DissectRequest) {
         self.latest_seq.store(req.seq, Ordering::Release);
-        // Ignore send errors — worker may have died
         let _ = self.request_tx.send(req);
     }
 
@@ -90,27 +92,80 @@ fn worker_loop(
     request_rx: mpsc::Receiver<DissectRequest>,
     result_tx: mpsc::Sender<DissectResult>,
     latest_seq: Arc<AtomicUsize>,
+    linktype: u32,
 ) {
     while let Ok(req) = request_rx.recv() {
-        // Skip stale requests — only process the latest
         if req.seq < latest_seq.load(Ordering::Acquire) {
             continue;
         }
 
+        let index = req.index;
+        let seq = req.seq;
+
+        let timeout_result = dissect_with_timeout(dissector, req, DISSECT_TIMEOUT);
+
+        match timeout_result {
+            TimeoutResult::Completed(d, returned) => {
+                dissector = returned;
+                let result = DissectResult { index, seq, detail: d.detail, error: d.error };
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+            }
+            TimeoutResult::TimedOut => {
+                let result = DissectResult {
+                    index,
+                    seq,
+                    detail: None,
+                    error: Some("tshark read timeout (10s) — dissector restarted".into()),
+                };
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+                match DeepDissector::new(linktype) {
+                    Ok(d) => dissector = d,
+                    Err(e) => {
+                        let _ = result_tx.send(DissectResult {
+                            index,
+                            seq,
+                            detail: None,
+                            error: Some(format!("failed to restart tshark after timeout: {e:#}")),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct InnerResult {
+    detail: Option<PacketDetail>,
+    error: Option<String>,
+}
+
+enum TimeoutResult {
+    Completed(InnerResult, DeepDissector),
+    TimedOut,
+}
+
+fn dissect_with_timeout(
+    mut dissector: DeepDissector,
+    req: DissectRequest,
+    timeout: Duration,
+) -> TimeoutResult {
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
         let (detail, error) = match dissector.dissect_packet(&req.raw, req.timestamp) {
             Ok(d) => (Some(d), None),
             Err(e) => (None, Some(format!("{e:#}"))),
         };
+        let _ = tx.send((InnerResult { detail, error }, dissector));
+    });
 
-        let result = DissectResult {
-            index: req.index,
-            seq: req.seq,
-            detail,
-            error,
-        };
-
-        if result_tx.send(result).is_err() {
-            break; // main thread dropped the receiver
-        }
+    match rx.recv_timeout(timeout) {
+        Ok((result, returned)) => TimeoutResult::Completed(result, returned),
+        Err(_) => TimeoutResult::TimedOut,
     }
 }

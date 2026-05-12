@@ -222,6 +222,10 @@ mod tests {
             src_port: Some(54321),
             dst_port: Some(443),
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         }
     }
 

@@ -42,13 +42,25 @@ fn infer_network_layer(pkt: &PacketSummary) -> Protocol {
 fn protocol_layers(pkt: &PacketSummary) -> ([Protocol; 4], usize) {
     let net = infer_network_layer(pkt);
     match &pkt.protocol {
-        // Application-layer: Protocol::Dns currently only comes from UDP classification
-        // in fast.rs (TCP port 53 is not yet recognized as DNS). Always use UDP transport.
-        Protocol::Dns => {
-            ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dns], 4)
-        }
+        // Application-layer over TCP
         Protocol::Http => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Http], 4),
         Protocol::Tls => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Tls], 4),
+        Protocol::Ssh => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Ssh], 4),
+        Protocol::Smtp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Smtp], 4),
+        Protocol::Ftp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Ftp], 4),
+        Protocol::Telnet => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Telnet], 4),
+        Protocol::Rdp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Rdp], 4),
+        Protocol::Bgp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Bgp], 4),
+        Protocol::Ldap => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Ldap], 4),
+        // Application-layer over UDP
+        Protocol::Dns => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dns], 4),
+        Protocol::Dhcp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dhcp], 4),
+        Protocol::Ntp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Ntp], 4),
+        Protocol::Snmp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Snmp], 4),
+        Protocol::Syslog => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Syslog], 4),
+        Protocol::Tftp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Tftp], 4),
+        Protocol::Mdns => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Mdns], 4),
+        Protocol::Radius => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Radius], 4),
         // Transport-layer
         Protocol::Tcp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Tcp], 3),
         Protocol::Udp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Udp], 3),
@@ -82,6 +94,20 @@ fn proto_discriminant(p: &Protocol) -> u16 {
         Protocol::Ethernet => 10,
         Protocol::Pflog => 12,
         Protocol::Enc => 13,
+        Protocol::Ssh => 14,
+        Protocol::Smtp => 15,
+        Protocol::Ftp => 16,
+        Protocol::Telnet => 17,
+        Protocol::Rdp => 18,
+        Protocol::Bgp => 19,
+        Protocol::Ldap => 20,
+        Protocol::Dhcp => 21,
+        Protocol::Ntp => 22,
+        Protocol::Snmp => 23,
+        Protocol::Syslog => 24,
+        Protocol::Tftp => 25,
+        Protocol::Mdns => 26,
+        Protocol::Radius => 27,
         Protocol::Unknown(_) => 11,
     }
 }
@@ -210,8 +236,22 @@ fn is_child_of(child: &Protocol, parent: &Protocol) -> bool {
         (Protocol::Http, Protocol::Tcp) => true,
         (Protocol::Tls, Protocol::Tcp) => true,
         (Protocol::Dns, Protocol::Tcp) => true,
+        (Protocol::Ssh, Protocol::Tcp) => true,
+        (Protocol::Smtp, Protocol::Tcp) => true,
+        (Protocol::Ftp, Protocol::Tcp) => true,
+        (Protocol::Telnet, Protocol::Tcp) => true,
+        (Protocol::Rdp, Protocol::Tcp) => true,
+        (Protocol::Bgp, Protocol::Tcp) => true,
+        (Protocol::Ldap, Protocol::Tcp) => true,
         // Application under UDP
         (Protocol::Dns, Protocol::Udp) => true,
+        (Protocol::Dhcp, Protocol::Udp) => true,
+        (Protocol::Ntp, Protocol::Udp) => true,
+        (Protocol::Snmp, Protocol::Udp) => true,
+        (Protocol::Syslog, Protocol::Udp) => true,
+        (Protocol::Tftp, Protocol::Udp) => true,
+        (Protocol::Mdns, Protocol::Udp) => true,
+        (Protocol::Radius, Protocol::Udp) => true,
         // Network under Ethernet (link → network)
         (Protocol::Ipv4, Protocol::Ethernet) => true,
         (Protocol::Ipv6, Protocol::Ethernet) => true,
@@ -309,6 +349,10 @@ mod tests {
             src_port: Some(12345),
             dst_port: Some(80),
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         (summary, raw)
     }

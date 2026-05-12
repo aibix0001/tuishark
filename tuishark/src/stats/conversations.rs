@@ -204,6 +204,10 @@ mod tests {
             src_port: Some(src_port),
             dst_port: Some(dst_port),
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         (summary, raw)
     }

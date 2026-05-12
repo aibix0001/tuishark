@@ -111,6 +111,10 @@ mod tests {
             src_port: Some(12345),
             dst_port: Some(80),
             link_meta: None,
+            eth_src: None,
+            eth_dst: None,
+            vlan_id: None,
+            tcp_flags: 0,
         };
         (summary, raw)
     }

@@ -5,17 +5,22 @@
 ///   or_expr  = and_expr (("or" | "||") and_expr)*
 ///   and_expr = not_expr (("and" | "&&") not_expr)*
 ///   not_expr = ("not" | "!") not_expr | primary
-///   primary  = "(" expr ")" | comparison | contains
+///   primary  = "(" expr ")" | comparison | contains | bare_proto | bare_field
 ///   comparison = field compare_op value
 ///   contains   = field "contains" quoted_string
+///   bare_proto = protocol_name  (desugars to proto == name)
+///   bare_field = boolean_field   (desugars to field != 0)
 ///   field    = "ip.src" | "ip.dst" | "ip.addr" | "port.src" | "port.dst" | "port" | "proto" | "len" | "info"
+///            | "eth.src" | "eth.dst" | "eth.addr" | "vlan.id"
+///            | "tcp.flags.syn" | "tcp.flags.ack" | "tcp.flags.fin" | "tcp.flags.rst" | "tcp.flags.psh" | "tcp.flags.urg"
+///            | "tcp.srcport" | "tcp.dstport" | "udp.srcport" | "udp.dstport" | "frame.len"
 ///            | "pf.action" | "pf.direction" | "pf.dir" | "pf.ifname" | "pf.interface" | "pf.rule" | "pf.reason"
 ///            | "enc.spi" | "enc.flags"
-///   value    supports hex literals: 0x1234 → parsed as integer
+///   value    = integer | string | cidr
 ///   compare_op = "==" | "!=" | ">" | "<" | ">=" | "<="
-///   value    = integer | string
 
 use super::ast::{CompareOp, Expr, Field, Value};
+use crate::dissect::model::Protocol;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -105,10 +110,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // Word or number
-        if chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.' {
+        // Word or number (includes ':', '/' for IPv6 and CIDR notation)
+        if chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.' || chars[i] == ':' || chars[i] == '/' {
             let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.' || chars[i] == ':' || chars[i] == '/') {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
@@ -123,12 +128,22 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 "ip.src" => tokens.push(Token::Field(Field::IpSrc)),
                 "ip.dst" => tokens.push(Token::Field(Field::IpDst)),
                 "ip.addr" => tokens.push(Token::Field(Field::IpAddr)),
-                "port.src" => tokens.push(Token::Field(Field::PortSrc)),
-                "port.dst" => tokens.push(Token::Field(Field::PortDst)),
+                "port.src" | "tcp.srcport" | "udp.srcport" => tokens.push(Token::Field(Field::PortSrc)),
+                "port.dst" | "tcp.dstport" | "udp.dstport" => tokens.push(Token::Field(Field::PortDst)),
                 "port" => tokens.push(Token::Field(Field::Port)),
                 "proto" => tokens.push(Token::Field(Field::Proto)),
-                "len" => tokens.push(Token::Field(Field::Len)),
+                "len" | "frame.len" => tokens.push(Token::Field(Field::Len)),
                 "info" => tokens.push(Token::Field(Field::Info)),
+                "eth.src" => tokens.push(Token::Field(Field::EthSrc)),
+                "eth.dst" => tokens.push(Token::Field(Field::EthDst)),
+                "eth.addr" => tokens.push(Token::Field(Field::EthAddr)),
+                "vlan.id" => tokens.push(Token::Field(Field::VlanId)),
+                "tcp.flags.syn" => tokens.push(Token::Field(Field::TcpFlagSyn)),
+                "tcp.flags.ack" => tokens.push(Token::Field(Field::TcpFlagAck)),
+                "tcp.flags.fin" => tokens.push(Token::Field(Field::TcpFlagFin)),
+                "tcp.flags.rst" => tokens.push(Token::Field(Field::TcpFlagRst)),
+                "tcp.flags.psh" => tokens.push(Token::Field(Field::TcpFlagPsh)),
+                "tcp.flags.urg" => tokens.push(Token::Field(Field::TcpFlagUrg)),
                 "pf.action" => tokens.push(Token::Field(Field::PfAction)),
                 "pf.direction" | "pf.dir" => tokens.push(Token::Field(Field::PfDirection)),
                 "pf.ifname" | "pf.interface" => tokens.push(Token::Field(Field::PfIfname)),
@@ -147,7 +162,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                             tokens.push(Token::Str(word));
                         }
                     } else {
-                        // Unquoted string value (e.g., protocol name, IP address)
+                        // Unquoted string value (e.g., protocol name, IP address, CIDR)
                         tokens.push(Token::Str(word));
                     }
                 }
@@ -206,12 +221,40 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
         return Ok(expr);
     }
 
-    // Must be a field comparison or contains
+    // Bare protocol name: `tcp` → ProtoMatch("tcp")
+    if let Token::Str(s) = &tokens[*pos] {
+        if Protocol::is_known_name(s) {
+            let next_is_operator = *pos + 1 < tokens.len()
+                && matches!(
+                    &tokens[*pos + 1],
+                    Token::Op(_) | Token::Contains
+                );
+            if !next_is_operator {
+                let name = s.to_ascii_lowercase();
+                *pos += 1;
+                return Ok(Expr::ProtoMatch(name));
+            }
+        }
+    }
+
+    // Field-based expressions
     let field = match &tokens[*pos] {
         Token::Field(f) => f.clone(),
         other => return Err(format!("expected field name, got {other:?}")),
     };
     *pos += 1;
+
+    // Bare boolean field: `tcp.flags.syn` with no operator following
+    if field.is_boolean() {
+        let has_operator = *pos < tokens.len()
+            && matches!(
+                &tokens[*pos],
+                Token::Op(_) | Token::Contains
+            );
+        if !has_operator {
+            return Ok(Expr::BareField(field));
+        }
+    }
 
     if *pos >= tokens.len() {
         return Err("expected operator after field".into());
@@ -244,13 +287,24 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
     }
 
     let value = match &tokens[*pos] {
-        Token::Str(s) => Value::Str(s.clone()),
+        Token::Str(s) => parse_value_str(s),
         Token::Int(n) => Value::Int(*n),
         other => return Err(format!("expected value, got {other:?}")),
     };
     *pos += 1;
 
     Ok(Expr::Compare { field, op, value })
+}
+
+fn parse_value_str(s: &str) -> Value {
+    if let Some((addr_str, prefix_str)) = s.rsplit_once('/') {
+        if let Ok(prefix_len) = prefix_str.parse::<u8>() {
+            if let Ok(addr) = addr_str.parse::<std::net::IpAddr>() {
+                return Value::Cidr { addr, prefix_len };
+            }
+        }
+    }
+    Value::Str(s.to_string())
 }
 
 #[cfg(test)]
@@ -458,6 +512,197 @@ mod tests {
                 field: Field::PfReason,
                 op: CompareOp::Eq,
                 value: Value::Str("match".into()),
+            }
+        );
+    }
+
+    // --- Bare protocol ---
+
+    #[test]
+    fn parse_bare_proto() {
+        let expr = parse("tcp").unwrap();
+        assert_eq!(expr, Expr::ProtoMatch("tcp".into()));
+    }
+
+    #[test]
+    fn parse_bare_proto_and() {
+        let expr = parse("tcp and port == 80").unwrap();
+        assert!(matches!(expr, Expr::And(_, _)));
+    }
+
+    #[test]
+    fn parse_bare_proto_or() {
+        let expr = parse("tcp or udp").unwrap();
+        assert!(matches!(expr, Expr::Or(_, _)));
+    }
+
+    #[test]
+    fn parse_bare_proto_not() {
+        let expr = parse("not arp").unwrap();
+        assert!(matches!(expr, Expr::Not(_)));
+    }
+
+    // --- CIDR ---
+
+    #[test]
+    fn parse_cidr_v4() {
+        let expr = parse("ip.src == 192.168.0.0/16").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::Compare {
+                value: Value::Cidr { prefix_len: 16, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_cidr_v6() {
+        let expr = parse("ip.src == 2001:db8::/32").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::Compare {
+                value: Value::Cidr { prefix_len: 32, .. },
+                ..
+            }
+        ));
+    }
+
+    // --- Wireshark field aliases ---
+
+    #[test]
+    fn parse_tcp_srcport() {
+        let expr = parse("tcp.srcport == 80").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PortSrc,
+                op: CompareOp::Eq,
+                value: Value::Int(80),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_udp_dstport() {
+        let expr = parse("udp.dstport == 53").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::PortDst,
+                op: CompareOp::Eq,
+                value: Value::Int(53),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_frame_len() {
+        let expr = parse("frame.len > 1000").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::Len,
+                op: CompareOp::Gt,
+                value: Value::Int(1000),
+            }
+        );
+    }
+
+    // --- MAC address fields ---
+
+    #[test]
+    fn parse_eth_src() {
+        let expr = parse("eth.src == aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::EthSrc,
+                op: CompareOp::Eq,
+                value: Value::Str("aa:bb:cc:dd:ee:ff".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_eth_addr() {
+        let expr = parse("eth.addr == 00:11:22:33:44:55").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::EthAddr,
+                op: CompareOp::Eq,
+                value: Value::Str("00:11:22:33:44:55".into()),
+            }
+        );
+    }
+
+    // --- VLAN ---
+
+    #[test]
+    fn parse_vlan_id() {
+        let expr = parse("vlan.id == 100").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::VlanId,
+                op: CompareOp::Eq,
+                value: Value::Int(100),
+            }
+        );
+    }
+
+    // --- TCP flags ---
+
+    #[test]
+    fn parse_tcp_flags_bare() {
+        let expr = parse("tcp.flags.syn").unwrap();
+        assert_eq!(expr, Expr::BareField(Field::TcpFlagSyn));
+    }
+
+    #[test]
+    fn parse_tcp_flags_compare() {
+        let expr = parse("tcp.flags.rst == 1").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::TcpFlagRst,
+                op: CompareOp::Eq,
+                value: Value::Int(1),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_tcp_flags_bare_and() {
+        let expr = parse("tcp.flags.syn and tcp.flags.ack").unwrap();
+        assert!(matches!(expr, Expr::And(_, _)));
+    }
+
+    // --- IPv6 tokenization ---
+
+    #[test]
+    fn parse_ipv6_address() {
+        let expr = parse("ip.src == 2001:db8::1").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::IpSrc,
+                op: CompareOp::Eq,
+                value: Value::Str("2001:db8::1".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipv6_full() {
+        let expr = parse("ip.dst == fe80::1").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                field: Field::IpDst,
+                op: CompareOp::Eq,
+                value: Value::Str("fe80::1".into()),
             }
         );
     }

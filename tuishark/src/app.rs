@@ -219,6 +219,7 @@ pub struct App {
     ai_state: AiState,
     ai_cache: AiCache,
     ai_worker: Option<AiWorker>,
+    ai_prompts: crate::config::ai::AiPromptConfig,
     ai_seq: usize,
     // Statistics dialog (Phase 7)
     show_stats_dialog: bool,
@@ -301,6 +302,7 @@ impl App {
         let theme = Theme::from_flavor(config.theme.flavor);
         let auto_scroll = config.display.auto_scroll;
         let ai_cache_size = config.ai.cache_size;
+        let ai_prompts = crate::config::ai::AiPromptConfig::load(config.ai.prompt_file.as_deref());
 
         // Apply default interface from config if no CLI interface specified
         let interface = interface.or_else(|| {
@@ -408,6 +410,7 @@ impl App {
             ai_state: AiState::Idle,
             ai_cache: AiCache::new(ai_cache_size),
             ai_worker: None,
+            ai_prompts,
             ai_seq: 0,
             // Statistics dialog
             show_stats_dialog: false,
@@ -3173,12 +3176,12 @@ impl App {
         }
         let context_json = self.build_ai_context(packet_index);
         let messages = match &kind {
-            AiRequestKind::WholePacket => build_whole_packet_messages(&context_json),
+            AiRequestKind::WholePacket => build_whole_packet_messages(&context_json, &self.ai_prompts),
             AiRequestKind::Field { layer_index, field_index } => {
                 let field_ctx = self.detail.as_ref()
                     .map(|d| build_field_context(d, *layer_index, *field_index));
                 let field_json = field_ctx.map(|v| v.to_string()).unwrap_or_else(|| "{}".into());
-                build_field_messages(&field_json, &context_json)
+                build_field_messages(&field_json, &context_json, &self.ai_prompts)
             }
         };
         self.ai_seq += 1;
@@ -3193,7 +3196,7 @@ impl App {
     fn fire_ai_whole_packet(&mut self, packet_index: usize) {
         if self.ai_worker.is_none() { return; }
         let context_json = self.build_ai_context(packet_index);
-        let messages = build_whole_packet_messages(&context_json);
+        let messages = build_whole_packet_messages(&context_json, &self.ai_prompts);
         self.ai_seq += 1;
         let seq = self.ai_seq;
         if let Some(ref worker) = self.ai_worker {

@@ -29,6 +29,9 @@ pub fn tshark_available() -> bool {
 /// Monotonically increasing; used to discard stale results.
 static REQUEST_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+/// Global instance counter for unique FIFO paths (avoids collision on dissector restart).
+static INSTANCE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
 /// Get the next unique request sequence number.
 pub fn next_request_seq() -> usize {
     REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
@@ -51,7 +54,8 @@ impl DeepDissector {
     /// Create a new DeepDissector with the given pcap linktype.
     /// Use `LINKTYPE_ETHERNET` (1) for standard Ethernet captures.
     pub fn new(linktype: u32) -> Result<Self> {
-        let fifo_path = std::env::temp_dir().join(format!("tuishark-{}.fifo", process::id()));
+        let instance = INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let fifo_path = std::env::temp_dir().join(format!("tuishark-{}-{}.fifo", process::id(), instance));
 
         // Remove stale FIFO if it exists
         let _ = fs::remove_file(&fifo_path);

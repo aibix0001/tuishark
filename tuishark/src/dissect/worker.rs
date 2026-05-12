@@ -8,6 +8,7 @@ use super::deep::DeepDissector;
 use super::model::PacketDetail;
 
 const DISSECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CONSECUTIVE_TIMEOUTS: usize = 3;
 
 /// Request to deeply dissect a packet.
 pub struct DissectRequest {
@@ -94,6 +95,8 @@ fn worker_loop(
     latest_seq: Arc<AtomicUsize>,
     linktype: u32,
 ) {
+    let mut consecutive_timeouts: usize = 0;
+
     while let Ok(req) = request_rx.recv() {
         if req.seq < latest_seq.load(Ordering::Acquire) {
             continue;
@@ -102,34 +105,42 @@ fn worker_loop(
         let index = req.index;
         let seq = req.seq;
 
-        let timeout_result = dissect_with_timeout(dissector, req, DISSECT_TIMEOUT);
-
-        match timeout_result {
-            TimeoutResult::Completed(d, returned) => {
+        match dissect_with_timeout(dissector, req, DISSECT_TIMEOUT) {
+            DissectOutcome::Ok { result, dissector: returned } => {
+                consecutive_timeouts = 0;
                 dissector = returned;
-                let result = DissectResult { index, seq, detail: d.detail, error: d.error };
-                if result_tx.send(result).is_err() {
+                let r = DissectResult { index, seq, detail: result.detail, error: result.error };
+                if result_tx.send(r).is_err() {
                     break;
                 }
             }
-            TimeoutResult::TimedOut => {
-                let result = DissectResult {
+            // Timeout: the helper thread leaks (holding the old dissector + tshark process)
+            // until rtshark.read() eventually returns. Bounded by MAX_CONSECUTIVE_TIMEOUTS.
+            DissectOutcome::TimedOut => {
+                consecutive_timeouts += 1;
+                let _ = result_tx.send(DissectResult {
                     index,
                     seq,
                     detail: None,
-                    error: Some("tshark read timeout (10s) — dissector restarted".into()),
-                };
-                if result_tx.send(result).is_err() {
+                    error: Some(format!(
+                        "tshark read timeout (10s) — dissector restarted ({consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS})"
+                    )),
+                });
+                if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+                    let _ = result_tx.send(DissectResult {
+                        index,
+                        seq,
+                        detail: None,
+                        error: Some("deep dissection disabled after repeated timeouts".into()),
+                    });
                     break;
                 }
                 match DeepDissector::new(linktype) {
                     Ok(d) => dissector = d,
                     Err(e) => {
                         let _ = result_tx.send(DissectResult {
-                            index,
-                            seq,
-                            detail: None,
-                            error: Some(format!("failed to restart tshark after timeout: {e:#}")),
+                            index, seq, detail: None,
+                            error: Some(format!("failed to restart tshark: {e:#}")),
                         });
                         break;
                     }
@@ -139,13 +150,13 @@ fn worker_loop(
     }
 }
 
-struct InnerResult {
+struct PartialResult {
     detail: Option<PacketDetail>,
     error: Option<String>,
 }
 
-enum TimeoutResult {
-    Completed(InnerResult, DeepDissector),
+enum DissectOutcome {
+    Ok { result: PartialResult, dissector: DeepDissector },
     TimedOut,
 }
 
@@ -153,7 +164,7 @@ fn dissect_with_timeout(
     mut dissector: DeepDissector,
     req: DissectRequest,
     timeout: Duration,
-) -> TimeoutResult {
+) -> DissectOutcome {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
@@ -161,11 +172,11 @@ fn dissect_with_timeout(
             Ok(d) => (Some(d), None),
             Err(e) => (None, Some(format!("{e:#}"))),
         };
-        let _ = tx.send((InnerResult { detail, error }, dissector));
+        let _ = tx.send((PartialResult { detail, error }, dissector));
     });
 
     match rx.recv_timeout(timeout) {
-        Ok((result, returned)) => TimeoutResult::Completed(result, returned),
-        Err(_) => TimeoutResult::TimedOut,
+        Ok((result, dissector)) => DissectOutcome::Ok { result, dissector },
+        Err(_) => DissectOutcome::TimedOut,
     }
 }

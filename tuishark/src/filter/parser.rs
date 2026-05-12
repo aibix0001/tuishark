@@ -300,7 +300,10 @@ fn parse_value_str(s: &str) -> Value {
     if let Some((addr_str, prefix_str)) = s.rsplit_once('/') {
         if let Ok(prefix_len) = prefix_str.parse::<u8>() {
             if let Ok(addr) = addr_str.parse::<std::net::IpAddr>() {
-                return Value::Cidr { addr, prefix_len };
+                let max_prefix = if addr.is_ipv4() { 32 } else { 128 };
+                if prefix_len <= max_prefix {
+                    return Value::Cidr { addr, prefix_len };
+                }
             }
         }
     }
@@ -563,6 +566,30 @@ mod tests {
             expr,
             Expr::Compare {
                 value: Value::Cidr { prefix_len: 32, .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_cidr_invalid_prefix() {
+        let expr = parse("ip.src == 10.0.0.0/33").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::Compare {
+                value: Value::Str(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_cidr_zero() {
+        let expr = parse("ip.src == 0.0.0.0/0").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::Compare {
+                value: Value::Cidr { prefix_len: 0, .. },
                 ..
             }
         ));

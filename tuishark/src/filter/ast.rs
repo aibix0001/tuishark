@@ -85,7 +85,7 @@ pub enum CompareOp {
     Le,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Str(String),
     Int(u64),
@@ -94,5 +94,3 @@ pub enum Value {
         prefix_len: u8,
     },
 }
-
-impl Eq for Value {}

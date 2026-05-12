@@ -52,8 +52,10 @@ fn protocol_layers(pkt: &PacketSummary) -> ([Protocol; 4], usize) {
         Protocol::Rdp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Rdp], 4),
         Protocol::Bgp => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Bgp], 4),
         Protocol::Ldap => ([Protocol::Ethernet, net, Protocol::Tcp, Protocol::Ldap], 4),
-        // Application-layer over UDP
-        Protocol::Dns => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dns], 4),
+        Protocol::Dns => {
+            let transport = if pkt.tcp_flags != 0 { Protocol::Tcp } else { Protocol::Udp };
+            ([Protocol::Ethernet, net, transport, Protocol::Dns], 4)
+        }
         Protocol::Dhcp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Dhcp], 4),
         Protocol::Ntp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Ntp], 4),
         Protocol::Snmp => ([Protocol::Ethernet, net, Protocol::Udp, Protocol::Snmp], 4),

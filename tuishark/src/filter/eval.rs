@@ -49,9 +49,8 @@ fn eval_compare(field: &Field, op: &CompareOp, value: &Value, pkt: &PacketSummar
             None => false,
         },
         Field::EthAddr => {
-            let src_match = pkt.eth_src.as_deref().is_some_and(|m| cmp_str(m, op, value));
-            let dst_match = pkt.eth_dst.as_deref().is_some_and(|m| cmp_str(m, op, value));
-            src_match || dst_match
+            pkt.eth_src.as_deref().is_some_and(|m| cmp_str(m, op, value))
+                || pkt.eth_dst.as_deref().is_some_and(|m| cmp_str(m, op, value))
         },
         Field::VlanId => match pkt.vlan_id {
             Some(vid) => cmp_int(vid as u64, op, value),
@@ -182,11 +181,19 @@ fn cmp_ip(field_val: &str, op: &CompareOp, value: &Value) -> bool {
     if let Value::Cidr { addr, prefix_len } = value {
         let matches_cidr = match (field_val.parse::<IpAddr>(), addr) {
             (Ok(IpAddr::V4(ip)), IpAddr::V4(net)) => {
-                let mask = if *prefix_len >= 32 { u32::MAX } else { !0u32 << (32 - prefix_len) };
+                let mask = match *prefix_len {
+                    0 => 0u32,
+                    p if p >= 32 => u32::MAX,
+                    p => !0u32 << (32 - p),
+                };
                 (u32::from(ip) & mask) == (u32::from(*net) & mask)
             }
             (Ok(IpAddr::V6(ip)), IpAddr::V6(net)) => {
-                let mask = if *prefix_len >= 128 { u128::MAX } else { !0u128 << (128 - prefix_len) };
+                let mask = match *prefix_len {
+                    0 => 0u128,
+                    p if p >= 128 => u128::MAX,
+                    p => !0u128 << (128 - p),
+                };
                 (u128::from(ip) & mask) == (u128::from(*net) & mask)
             }
             _ => false,
@@ -635,6 +642,18 @@ mod tests {
     fn cidr_dst() {
         assert!(eval("ip.dst == 10.0.0.0/8"));
         assert!(!eval("ip.dst == 172.16.0.0/12"));
+    }
+
+    #[test]
+    fn cidr_slash_zero_matches_all() {
+        assert!(eval("ip.src == 0.0.0.0/0"));
+        assert!(eval("ip.dst == 0.0.0.0/0"));
+    }
+
+    #[test]
+    fn cidr_slash_32_exact() {
+        assert!(eval("ip.src == 192.168.1.10/32"));
+        assert!(!eval("ip.src == 192.168.1.11/32"));
     }
 
     // --- Bare protocol name ---

@@ -66,12 +66,10 @@ pub fn parse_packet_with_wire_len(
     if let Some(Ok(parsed)) = parsed_result {
         // Link layer (Ethernet only)
         if let Some(LinkSlice::Ethernet2(ref eth)) = parsed.link {
-            let src_mac = format_mac(eth.source());
-            let dst_mac = format_mac(eth.destination());
-            source = src_mac.clone();
-            destination = dst_mac.clone();
-            eth_src = Some(src_mac);
-            eth_dst = Some(dst_mac);
+            source = format_mac(eth.source());
+            destination = format_mac(eth.destination());
+            eth_src = Some(source.clone());
+            eth_dst = Some(destination.clone());
             if matches!(protocol, Protocol::Unknown(_)) {
                 protocol = Protocol::Ethernet;
             }
@@ -653,6 +651,7 @@ fn classify_tcp_port(src: u16, dst: u16) -> Protocol {
     match (src, dst) {
         (80, _) | (_, 80) | (8080, _) | (_, 8080) => Protocol::Http,
         (443, _) | (_, 443) => Protocol::Tls,
+        (53, _) | (_, 53) => Protocol::Dns,
         (22, _) | (_, 22) => Protocol::Ssh,
         (25, _) | (_, 25) | (465, _) | (_, 465) | (587, _) | (_, 587) => Protocol::Smtp,
         (20, _) | (_, 20) | (21, _) | (_, 21) => Protocol::Ftp,
@@ -927,6 +926,9 @@ mod tests {
         assert!(matches!(classify_udp_port(12345, 53), Protocol::Dns));
         assert!(matches!(classify_udp_port(53, 12345), Protocol::Dns));
         assert!(matches!(classify_udp_port(12345, 9999), Protocol::Udp));
+        // DNS over TCP
+        assert!(matches!(classify_tcp_port(12345, 53), Protocol::Dns));
+        assert!(matches!(classify_tcp_port(53, 12345), Protocol::Dns));
         // Expanded TCP classification
         assert!(matches!(classify_tcp_port(12345, 22), Protocol::Ssh));
         assert!(matches!(classify_tcp_port(12345, 25), Protocol::Smtp));

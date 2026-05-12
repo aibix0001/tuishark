@@ -1,41 +1,10 @@
 use serde_json::{json, Value};
 
+use crate::config::ai::AiPromptConfig;
 use crate::dissect::model::{Layer, LinkMeta, PacketDetail, PacketSummary};
 use crate::trace::model::{ContainerInfo, ProcessInfo};
 
 use super::model::ChatMessage;
-
-const SYSTEM_PROMPT: &str = "\
-You are a network packet analysis tutor embedded in TuiShark.\n\
-Explain only from the supplied packet context.\n\
-Be accurate, concise, and educational.\n\
-Prefer protocol facts over speculation.\n\
-If information is missing or ambiguous, say what cannot be determined.\n\
-Do not invent payload contents that are not present in the supplied fields or bytes.\n\
-Connect general networking knowledge to the concrete selected packet.\n\
-Structure the answer for a terminal UI.\n\
-Do not use markdown formatting — no asterisks, no headers, no backticks.\n\
-Use plain text with line breaks and indentation for structure.";
-
-const WHOLE_PACKET_PROMPT: &str = "\
-Explain this packet at a high level for someone learning networking.\n\
-\n\
-Answer these questions:\n\
-1. What protocol stack and packet type does this represent?\n\
-2. What are the source and destination endpoints?\n\
-3. What important flags, codes, ports, lengths, or header fields stand out?\n\
-4. What does this packet likely mean in the flow?\n\
-5. Are there any warnings, anomalies, retransmissions, resets, fragmentation, \
-truncation, private/public address notes, or security-relevant observations?";
-
-const FIELD_PROMPT: &str = "\
-Explain the selected packet field for someone learning networking.\n\
-\n\
-Cover:\n\
-1. What this field means generally.\n\
-2. How to interpret this packet's value.\n\
-3. How this field relates to the current packet and connection.\n\
-4. Whether the value is normal, suspicious, or context-dependent.";
 
 pub fn build_packet_context(
     summary: &PacketSummary,
@@ -170,17 +139,15 @@ pub fn build_field_context(
     ctx
 }
 
-pub fn build_whole_packet_messages(context_json: &str) -> Vec<ChatMessage> {
+pub fn build_whole_packet_messages(context_json: &str, prompts: &AiPromptConfig) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".into(),
-            content: SYSTEM_PROMPT.into(),
+            content: prompts.system.clone(),
         },
         ChatMessage {
             role: "user".into(),
-            content: format!(
-                "{WHOLE_PACKET_PROMPT}\n\nPacket context:\n{context_json}"
-            ),
+            content: prompts.render_whole_packet(context_json),
         },
     ]
 }
@@ -188,18 +155,16 @@ pub fn build_whole_packet_messages(context_json: &str) -> Vec<ChatMessage> {
 pub fn build_field_messages(
     field_context_json: &str,
     packet_context_json: &str,
+    prompts: &AiPromptConfig,
 ) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".into(),
-            content: SYSTEM_PROMPT.into(),
+            content: prompts.system.clone(),
         },
         ChatMessage {
             role: "user".into(),
-            content: format!(
-                "{FIELD_PROMPT}\n\nSelected field context:\n{field_context_json}\n\n\
-                 Full packet context:\n{packet_context_json}"
-            ),
+            content: prompts.render_field(field_context_json, packet_context_json),
         },
     ]
 }
@@ -322,7 +287,8 @@ mod tests {
 
     #[test]
     fn whole_packet_messages_structure() {
-        let msgs = build_whole_packet_messages("{}");
+        let prompts = AiPromptConfig::default();
+        let msgs = build_whole_packet_messages("{}", &prompts);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "system");
         assert!(msgs[0].content.contains("network packet analysis tutor"));
@@ -332,11 +298,44 @@ mod tests {
 
     #[test]
     fn field_messages_structure() {
-        let msgs = build_field_messages("{\"selected_layer\":\"TCP\"}", "{}");
+        let prompts = AiPromptConfig::default();
+        let msgs = build_field_messages("{\"selected_layer\":\"TCP\"}", "{}", &prompts);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "system");
         assert_eq!(msgs[1].role, "user");
         assert!(msgs[1].content.contains("selected_layer"));
+    }
+
+    #[test]
+    fn custom_prompts_override_defaults() {
+        let prompts = AiPromptConfig {
+            system: "Custom system".into(),
+            whole_packet: "Custom whole {packet_context_json}".into(),
+            field: "Custom field {selected_field_context_json} {packet_context_json}".into(),
+        };
+        let msgs = build_whole_packet_messages("{\"test\":1}", &prompts);
+        assert_eq!(msgs[0].content, "Custom system");
+        assert!(msgs[1].content.contains("{\"test\":1}"));
+
+        let msgs = build_field_messages("{\"field\":1}", "{\"pkt\":1}", &prompts);
+        assert!(msgs[1].content.contains("{\"field\":1}"));
+        assert!(msgs[1].content.contains("{\"pkt\":1}"));
+    }
+
+    #[test]
+    fn prompts_without_placeholders_append_context() {
+        let prompts = AiPromptConfig {
+            system: "sys".into(),
+            whole_packet: "Explain this packet.".into(),
+            field: "Explain this field.".into(),
+        };
+        let msgs = build_whole_packet_messages("{\"test\":1}", &prompts);
+        assert!(msgs[1].content.contains("Packet context:"));
+        assert!(msgs[1].content.contains("{\"test\":1}"));
+
+        let msgs = build_field_messages("{\"f\":1}", "{\"p\":1}", &prompts);
+        assert!(msgs[1].content.contains("Selected field context:"));
+        assert!(msgs[1].content.contains("Full packet context:"));
     }
 
     #[test]

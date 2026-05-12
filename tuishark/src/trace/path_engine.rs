@@ -76,7 +76,9 @@ impl PathTraceEngine {
     /// This method loads and attaches the path kprobe programs that are present in the
     /// same eBPF object file.
     pub fn attach(bpf: &mut Ebpf) -> Result<Self, String> {
-        // Attach path kprobes — skip those whose kernel function doesn't exist
+        // Populate OFFSET_CONFIG from kernel BTF (fall back to defaults)
+        Self::populate_offset_config(bpf)?;
+
         let mut attached = 0;
         let mut skipped = Vec::new();
         for &(prog_name, fn_name, _func_id) in Self::PATH_PROBES {
@@ -136,6 +138,65 @@ impl PathTraceEngine {
             events_lost: 0,
             state: PathTraceState::Active,
         })
+    }
+
+    fn populate_offset_config(bpf: &mut Ebpf) -> Result<(), String> {
+        use super::btf;
+
+        let resolved = match btf::resolve_from_btf() {
+            Ok(r) => {
+                eprintln!(
+                    "[tuishark] BTF offsets resolved: sk_buff(transport={}, network={}, head={})",
+                    r.skb.transport_header, r.skb.network_header, r.skb.head
+                );
+                r
+            }
+            Err(e) => {
+                eprintln!("[tuishark] BTF unavailable ({e}), using hardcoded defaults");
+                btf::ResolvedOffsets::defaults()
+            }
+        };
+
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct OffsetConfig {
+            skb_transport_header: u32,
+            skb_network_header: u32,
+            skb_head: u32,
+            skb_dev: u32,
+            skb_sk: u32,
+            netdev_ifindex: u32,
+            netdev_nd_net: u32,
+            netdev_name: u32,
+            net_ns_inum: u32,
+            _pad: [u32; 7],
+        }
+
+        unsafe impl aya::Pod for OffsetConfig {}
+
+        let config = OffsetConfig {
+            skb_transport_header: resolved.skb.transport_header as u32,
+            skb_network_header: resolved.skb.network_header as u32,
+            skb_head: resolved.skb.head as u32,
+            skb_dev: resolved.skb.dev as u32,
+            skb_sk: resolved.skb.sk as u32,
+            netdev_ifindex: resolved.netdev.ifindex as u32,
+            netdev_nd_net: resolved.netdev.nd_net as u32,
+            netdev_name: resolved.netdev.name as u32,
+            net_ns_inum: resolved.net_ns_inum as u32,
+            _pad: [0; 7],
+        };
+
+        let mut map: Array<_, OffsetConfig> = bpf
+            .map_mut("OFFSET_CONFIG")
+            .ok_or("OFFSET_CONFIG map not found")?
+            .try_into()
+            .map_err(|e| format!("OFFSET_CONFIG map error: {e}"))?;
+
+        map.set(0, config, 0)
+            .map_err(|e| format!("failed to write OFFSET_CONFIG: {e}"))?;
+
+        Ok(())
     }
 
     /// Poll all per-CPU perf buffers and return collected PathEvents.

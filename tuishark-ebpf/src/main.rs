@@ -70,13 +70,27 @@ struct TraceFilter {
     _pad: [u8; 2],
 }
 
+/// Kernel struct offsets resolved at load time from BTF.
+/// Populated by userspace before kprobes are attached.
+/// If BTF is unavailable, userspace fills with hardcoded defaults.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct OffsetConfig {
+    skb_transport_header: u32,
+    skb_network_header: u32,
+    skb_head: u32,
+    skb_dev: u32,
+    skb_sk: u32,
+    netdev_ifindex: u32,
+    netdev_nd_net: u32,
+    netdev_name: u32,
+    net_ns_inum: u32,
+    _pad: [u32; 7],
+}
+
 const AF_INET: u16 = 2;
 
-// ─── sk_buff struct offsets for Linux 6.x (x86_64/aarch64, 64-bit) ────────
-//
-// These are hardcoded offsets into `struct sk_buff`. They are stable across
-// the Linux 6.x series on 64-bit with typical distro configs.
-//
+// ─── sk_buff struct offsets (defaults for Linux 6.19.3, overridden by BTF) ──
 // TODO: Migrate to CO-RE/BTF for kernel-version-independent access.
 //
 // Validated against pahole output for Linux 6.19.3:
@@ -158,6 +172,10 @@ static PATH_EVENTS: PerfEventArray<PathEvent> = PerfEventArray::new(0);
 /// Single-element array holding the active trace filter (written by userspace).
 #[map]
 static TRACE_FILTER: Array<TraceFilter> = Array::with_max_entries(1, 0);
+
+/// Kernel struct offsets populated by userspace from BTF (or hardcoded defaults).
+#[map]
+static OFFSET_CONFIG: Array<OffsetConfig> = Array::with_max_entries(1, 0);
 
 // ─── Existing process-info tracing (unchanged) ────────────────────────────
 
@@ -261,17 +279,33 @@ kprobe_handler!(trace_udp_recvmsg, 17);
 ///          ip_output(net, sk, skb), ip_finish_output(net, sk, skb),
 ///          ip_forward_finish(net, sk, skb)
 #[inline(always)]
+unsafe fn get_offsets() -> OffsetConfig {
+    if let Some(cfg) = OFFSET_CONFIG.get(0) {
+        *cfg
+    } else {
+        OffsetConfig {
+            skb_transport_header: SKB_OFF_TRANSPORT_HEADER as u32,
+            skb_network_header: SKB_OFF_NETWORK_HEADER as u32,
+            skb_head: SKB_OFF_HEAD as u32,
+            skb_dev: SKB_OFF_DEV as u32,
+            skb_sk: SKB_OFF_SK as u32,
+            netdev_ifindex: NETDEV_OFF_IFINDEX as u32,
+            netdev_nd_net: NETDEV_OFF_ND_NET as u32,
+            netdev_name: NETDEV_OFF_NAME as u32,
+            net_ns_inum: NET_OFF_NS_INUM as u32,
+            _pad: [0; 7],
+        }
+    }
+}
+
+#[inline(always)]
 unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result<(), i64> {
     let skb: *const u8 = ctx.arg(skb_arg).ok_or(1i64)?;
+    let off = get_offsets();
 
-    // Read sk_buff->head (pointer to linear data buffer)
-    let head: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_HEAD) as *const *const u8)?;
-
-    // Read sk_buff->network_header (u16 offset from head)
-    let net_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_NETWORK_HEADER) as *const u16)?;
-
-    // Read sk_buff->transport_header (u16 offset from head)
-    let trans_off: u16 = bpf_probe_read_kernel(skb.add(SKB_OFF_TRANSPORT_HEADER) as *const u16)?;
+    let head: *const u8 = bpf_probe_read_kernel(skb.add(off.skb_head as usize) as *const *const u8)?;
+    let net_off: u16 = bpf_probe_read_kernel(skb.add(off.skb_network_header as usize) as *const u16)?;
+    let trans_off: u16 = bpf_probe_read_kernel(skb.add(off.skb_transport_header as usize) as *const u16)?;
 
     // Bail if headers not set (offset 0xFFFF means "not set" in the kernel)
     if net_off == 0xFFFF {
@@ -331,33 +365,28 @@ unsafe fn handle_skb(ctx: &ProbeContext, func_id: u16, skb_arg: usize) -> Result
     }
 
     // ─── Extract container context from sk_buff ────────────────────────
-    // Read sk_buff->dev (struct net_device *)
-    let dev_ptr: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_DEV) as *const *const u8)
+    let dev_ptr: *const u8 = bpf_probe_read_kernel(skb.add(off.skb_dev as usize) as *const *const u8)
         .unwrap_or(core::ptr::null());
 
     if !dev_ptr.is_null() {
-        // net_device->ifindex
-        let ifindex: u32 = bpf_probe_read_kernel(dev_ptr.add(NETDEV_OFF_IFINDEX) as *const u32)
+        let ifindex: u32 = bpf_probe_read_kernel(dev_ptr.add(off.netdev_ifindex as usize) as *const u32)
             .unwrap_or(0);
 
-        // net_device->name (char[16])
         let mut dev_name = [0u8; 16];
-        let name_ptr = dev_ptr.add(NETDEV_OFF_NAME);
+        let name_ptr = dev_ptr.add(off.netdev_name as usize);
         let _ = bpf_probe_read_kernel_buf(name_ptr, &mut dev_name);
 
-        // net_device->nd_net.net (struct net *)
         let net_ptr: *const u8 = bpf_probe_read_kernel(
-            dev_ptr.add(NETDEV_OFF_ND_NET) as *const *const u8
+            dev_ptr.add(off.netdev_nd_net as usize) as *const *const u8
         ).unwrap_or(core::ptr::null());
 
         let netns_inum: u32 = if !net_ptr.is_null() {
-            bpf_probe_read_kernel(net_ptr.add(NET_OFF_NS_INUM) as *const u32).unwrap_or(0)
+            bpf_probe_read_kernel(net_ptr.add(off.net_ns_inum as usize) as *const u32).unwrap_or(0)
         } else {
             0
         };
 
-        // TCP state: read from sk_buff->sk->__sk_common.skc_state
-        let sk_ptr: *const u8 = bpf_probe_read_kernel(skb.add(SKB_OFF_SK) as *const *const u8)
+        let sk_ptr: *const u8 = bpf_probe_read_kernel(skb.add(off.skb_sk as usize) as *const *const u8)
             .unwrap_or(core::ptr::null());
         let tcp_state: u8 = if !sk_ptr.is_null() && protocol == 6 {
             bpf_probe_read_kernel(sk_ptr.add(SKC_OFF_STATE) as *const u8).unwrap_or(0)

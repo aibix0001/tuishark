@@ -1,0 +1,130 @@
+# Forgejo Actions: multi-arch container image
+#
+# Forgejo counterpart of the build-amd64 / build-arm64 / create-manifest
+# stages in .gitlab-ci.yml. Native builds per architecture (no QEMU),
+# then combined into a single multi-arch manifest.
+#
+# Runner assumptions:
+#   - `ubuntu-latest` : amd64 runner with a working Docker CLI/daemon.
+#   - `arm64`         : native arm64 runner with a working Docker CLI/daemon.
+#   Both runners must have Docker (with buildx, i.e. Docker >= 23) available.
+#
+# Registry / auth (override via repo or org settings without editing this file):
+#   - vars.REGISTRY        : container registry host (default forgejo.lab.aibix.io)
+#   - vars.IMAGE_NAME      : image path under the registry (default aibix/tuishark)
+#   - secrets.REGISTRY_TOKEN: token with package:write; falls back to the
+#                             automatic per-job token (github.token) when unset.
+#
+# Path filter mirrors `.build-rules` in .gitlab-ci.yml: branch pushes only
+# build when a build input changes. Tag pushes always build (releases).
+
+name: docker
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '**'
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .forgejo/workflows/docker.yml
+      - Cargo.lock
+      - Cargo.toml
+      - tuishark/**
+      - tuishark-ebpf/**
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ${{ vars.REGISTRY || 'forgejo.lab.aibix.io' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'aibix/tuishark' }}
+
+jobs:
+  build-amd64:
+    name: build (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to registry
+        run: |
+          set -eu
+          echo "${{ secrets.REGISTRY_TOKEN || github.token }}" \
+            | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build & push amd64 image
+        run: |
+          set -eux
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${SHORT_SHA}-amd64" \
+            --push \
+            .
+
+  build-arm64:
+    name: build (linux/arm64)
+    runs-on: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to registry
+        run: |
+          set -eu
+          echo "${{ secrets.REGISTRY_TOKEN || github.token }}" \
+            | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build & push arm64 image
+        run: |
+          set -eux
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
+          docker buildx build \
+            --platform linux/arm64 \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${SHORT_SHA}-arm64" \
+            --push \
+            .
+
+  manifest:
+    name: multi-arch manifest
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Login to registry
+        run: |
+          set -eu
+          echo "${{ secrets.REGISTRY_TOKEN || github.token }}" \
+            | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Create & push manifests
+        run: |
+          set -eux
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-8)"
+          SOURCES="${IMAGE}:${SHORT_SHA}-amd64 ${IMAGE}:${SHORT_SHA}-arm64"
+
+          # `buildx imagetools create` assembles a multi-arch index from
+          # the per-arch images and pushes it (no experimental flag needed).
+
+          # Always publish the short-SHA tag.
+          docker buildx imagetools create -t "${IMAGE}:${SHORT_SHA}" ${SOURCES}
+
+          if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
+            BRANCH_TAG="$(echo "${GITHUB_REF_NAME}" | sed 's|[^a-zA-Z0-9._-]|-|g')"
+            docker buildx imagetools create -t "${IMAGE}:${BRANCH_TAG}" ${SOURCES}
+
+            if [ "${GITHUB_REF_NAME}" = "${DEFAULT_BRANCH}" ]; then
+              docker buildx imagetools create -t "${IMAGE}:latest" ${SOURCES}
+            fi
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            docker buildx imagetools create -t "${IMAGE}:${GITHUB_REF_NAME}" ${SOURCES}
+          fi

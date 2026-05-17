@@ -1,0 +1,102 @@
+# Forgejo Actions: lint & test
+#
+# Runs on every push and pull request against the Forgejo mirror
+# (ssh://git@forgejo.lab.aibix.io:224/aibix/tuishark.git).
+#
+# This is the Forgejo counterpart of the `check-freebsd` stage in
+# .gitlab-ci.yml, extended with fmt / clippy / test as requested.
+#
+# Runner assumptions:
+#   - `ubuntu-latest` resolves to a Debian/Ubuntu image with apt, git
+#     and node available (the Forgejo runner default, e.g.
+#     `node:20-bookworm` or `catthehacker/ubuntu:act-latest`).
+
+name: ci
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner time.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: fmt / clippy / test / freebsd-check
+    runs-on: ubuntu-latest
+    env:
+      # Pin to the same Rust version as the Dockerfile and .gitlab-ci.yml
+      # for reproducible results across the two CI systems.
+      RUST_VERSION: "1.94.0"
+      CARGO_TERM_COLOR: always
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          set -eux
+          # Run apt with sudo only when not already root (varies by runner image).
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+          $SUDO apt-get update
+          # libpcap-dev + pkg-config: the `pcap` crate links libpcap.
+          # build-essential: C toolchain/linker for native crates.
+          # tshark: deep-dissection integration tests; preseed debconf so
+          #         the wireshark-common prompt does not block the run.
+          echo "wireshark-common wireshark-common/install-setuid boolean false" \
+            | $SUDO debconf-set-selections
+          $SUDO apt-get install -y --no-install-recommends \
+            libpcap-dev \
+            pkg-config \
+            build-essential \
+            tshark \
+            curl \
+            ca-certificates
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${RUST_VERSION}" --profile default
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+
+      - name: Toolchain info
+        run: |
+          set -eux
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Add FreeBSD target
+        run: rustup target add x86_64-unknown-freebsd
+
+      - name: cargo fmt --check
+        # Report-only: the existing codebase is not yet rustfmt-clean and
+        # GitLab CI never enforced this. Tracked for cleanup in a separate
+        # issue; flip `continue-on-error` to false once the repo is clean.
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        # Report-only for the same reason as fmt. `trace` is not a default
+        # feature, so eBPF code is excluded (no nightly / bpf-linker here).
+        # Promote to a hard gate (-D warnings, continue-on-error: false)
+        # after the cleanup issue lands.
+        continue-on-error: true
+        run: cargo clippy --workspace --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: FreeBSD type-check
+        # Type-checking gate only (no linker needed); matches the
+        # `check-freebsd` job in .gitlab-ci.yml. Full FreeBSD
+        # cross-build is tracked separately (Phase 12).
+        run: cargo check --target x86_64-unknown-freebsd -p tuishark --locked
